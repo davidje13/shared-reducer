@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "lib": ["es2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["typescript-backend.ts", "typescript-frontend.ts"]
+}

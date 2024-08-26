@@ -1,0 +1,61 @@
+{
+  "name": "shared-reducer",
+  "version": "4.0.0",
+  "private": true,
+  "description": "shared state management",
+  "author": "David Evans",
+  "license": "MIT",
+  "keywords": [
+    "reducer",
+    "websocket"
+  ],
+  "exports": {
+    "./backend": {
+      "import": {
+        "default": "./backend/index.mjs",
+        "types": "./backend/index.d.ts"
+      },
+      "require": {
+        "default": "./backend/index.js",
+        "types": "./backend/index.d.ts"
+      }
+    },
+    "./frontend": {
+      "import": {
+        "default": "./frontend/index.mjs",
+        "types": "./frontend/index.d.ts"
+      },
+      "require": {
+        "default": "./frontend/index.js",
+        "types": "./frontend/index.d.ts"
+      }
+    }
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "test": "lean-test --preprocess=tsc --parallel-suites && package/build.sh && package/run.sh && tsc && prettier --check .",
+    "dopublish": "package/build.sh && npm publish package.tgz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davidje13/shared-reducer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davidje13/shared-reducer/issues"
+  },
+  "homepage": "https://github.com/davidje13/shared-reducer#readme",
+  "devDependencies": {
+    "@rollup/plugin-terser": "0.4.x",
+    "@rollup/plugin-typescript": "11.x",
+    "collection-storage": "3.x",
+    "json-immutability-helper": "3.x",
+    "lean-test": "2.x",
+    "prettier": "3.3.3",
+    "rollup": "4.x",
+    "rollup-plugin-dts": "6.x",
+    "superwstest": "2.x",
+    "tslib": "2.7.x",
+    "typescript": "5.5.x",
+    "websocket-express": "3.x"
+  }
+}
