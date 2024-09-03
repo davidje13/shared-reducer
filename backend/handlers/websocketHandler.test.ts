@@ -28,7 +28,13 @@ describe('websocketHandler', () => {
       app.ws(
         '/:id',
         handler(
-          (req: Request) => req.params['id'] ?? '',
+          (req: Request) => {
+            const id = req.params['id'];
+            if (id === 'error') {
+              throw new Error('oops');
+            }
+            return id ?? '';
+          },
           () => permission,
         ),
       );
@@ -61,6 +67,22 @@ describe('websocketHandler', () => {
       .expectJson()
       .sendJson({ change: { foo: ['=', 'v2'] } })
       .expectJson({ change: { foo: ['=', 'v2'] } });
+  });
+
+  it('rejects invalid messages', async ({ getTyped }) => {
+    const server = getTyped(SERVER_FACTORY)(ReadWrite);
+
+    await request(server)
+      .ws('/a')
+      .expectJson()
+      .sendText('{invalid}')
+      .expectJson({ error: "Expected property name or '}' in JSON at position 1" });
+  });
+
+  it('handles errors from the idGetter', async ({ getTyped }) => {
+    const server = getTyped(SERVER_FACTORY)(ReadWrite);
+
+    await request(server).ws('/error').expectJson({ error: 'oops' });
   });
 
   it('rejects changes in read-only mode', async ({ getTyped }) => {

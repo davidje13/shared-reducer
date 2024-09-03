@@ -1,5 +1,5 @@
 export interface Message {
-  change: Record<string, unknown>;
+  change: unknown;
   id?: number;
 }
 
@@ -12,9 +12,6 @@ function validateMessage(rawData: unknown): Message {
     throw new Error('Must specify change and optional id');
   }
   const { id, change } = rawData;
-  if (!isObject(change)) {
-    throw new Error('change must be a dictionary');
-  }
   if (id === undefined) {
     return { change };
   }
