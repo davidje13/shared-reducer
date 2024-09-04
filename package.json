@@ -1,6 +1,6 @@
 {
   "name": "shared-reducer",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "private": true,
   "description": "shared state management",
   "author": "David Evans",
