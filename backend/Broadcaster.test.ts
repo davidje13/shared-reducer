@@ -125,14 +125,14 @@ function validateTestT(x: unknown): TestT {
 }
 
 function setup(): {
-  model: InMemoryModel<TestT>;
+  model: InMemoryModel<string, TestT>;
   broadcaster: Broadcaster<TestT, Spec<TestT>>;
   subscribe: <MetaT>(
     id: string,
     onChange: (message: ChangeInfo<Spec<TestT>>, meta?: MetaT) => void,
   ) => Promise<Subscription<TestT, Spec<TestT>, MetaT>>;
 } {
-  const model = new InMemoryModel(validateTestT);
+  const model = new InMemoryModel<string, TestT>(validateTestT);
   const broadcaster = Broadcaster.for(model).withReducer<Spec<TestT>>(context).build();
 
   return {

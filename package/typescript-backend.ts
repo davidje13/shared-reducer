@@ -8,7 +8,7 @@ interface Type {
 }
 
 (async () => {
-  const model = new InMemoryModel<Type>();
+  const model = new InMemoryModel<string, Type>();
   model.set('a', { foo: 'v1' });
   const broadcaster = Broadcaster.for(model).withReducer<Spec<Type>>(context).build();
 

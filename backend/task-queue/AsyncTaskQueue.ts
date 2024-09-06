@@ -3,7 +3,7 @@ import type { Task, TaskQueue } from './TaskQueue';
 interface QueueItem<T> {
   task: Task<T>;
   resolve: (v: T) => void;
-  reject: (e: Error) => void;
+  reject: (e: unknown) => void;
 }
 
 export class AsyncTaskQueue<T> extends EventTarget implements TaskQueue<T> {
@@ -24,20 +24,13 @@ export class AsyncTaskQueue<T> extends EventTarget implements TaskQueue<T> {
     this._running = true;
     while (this._queue.length > 0) {
       const { task, resolve, reject } = this._queue.shift()!;
-
-      let result = null;
-      let success = false;
-      try {
-        result = await task();
-        success = true;
-      } catch (e) {
-        reject(e as Error);
-      }
-      if (success) {
-        resolve(result!);
-      }
+      await task().then(resolve, reject);
     }
     this._running = false;
     this.dispatchEvent(new CustomEvent('drain'));
+  }
+
+  public active(): boolean {
+    return this._running;
   }
 }

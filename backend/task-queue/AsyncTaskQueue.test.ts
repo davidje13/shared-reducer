@@ -118,6 +118,7 @@ describe('AsyncTaskQueue', () => {
 
     task2.resolve('B');
     await promise2;
+    await Promise.resolve();
     expect(drainHandler).toHaveBeenCalled({ times: 1 });
   });
 });

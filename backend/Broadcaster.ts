@@ -29,12 +29,14 @@ export interface TopicMessage<SpecT> {
   meta?: unknown;
 }
 
+type ID = string;
+
 interface BroadcasterBuilder<T, SpecT> {
   withReducer<SpecT2 extends SpecT>(context: Context<T, SpecT2>): BroadcasterBuilder<T, SpecT2>;
 
-  withSubscribers(subscribers: TopicMap<TopicMessage<SpecT>>): this;
+  withSubscribers(subscribers: TopicMap<ID, TopicMessage<SpecT>>): this;
 
-  withTaskQueues(taskQueues: TaskQueueMap<void>): this;
+  withTaskQueues(taskQueues: TaskQueueMap<ID, void>): this;
 
   withIdProvider(idProvider: UniqueIdProvider): this;
 
@@ -43,17 +45,17 @@ interface BroadcasterBuilder<T, SpecT> {
 
 export class Broadcaster<T, SpecT> {
   private constructor(
-    private readonly _model: Model<T>,
+    private readonly _model: Model<ID, T>,
     private readonly _context: Context<T, SpecT>,
-    private readonly _subscribers: TopicMap<TopicMessage<SpecT>>,
-    private readonly _taskQueues: TaskQueueMap<void>,
+    private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>,
+    private readonly _taskQueues: TaskQueueMap<ID, void>,
     private readonly _idProvider: UniqueIdProvider,
   ) {}
 
-  public static for<T2>(model: Model<T2>): BroadcasterBuilder<T2, unknown> {
+  public static for<T2>(model: Model<ID, T2>): BroadcasterBuilder<T2, unknown> {
     let bContext: Context<T2, unknown> | undefined;
-    let bSubscribers: TopicMap<TopicMessage<unknown>> | undefined;
-    let bTaskQueues: TaskQueueMap<void> | undefined;
+    let bSubscribers: TopicMap<ID, TopicMessage<unknown>> | undefined;
+    let bTaskQueues: TaskQueueMap<ID, void> | undefined;
     let bIdProvider: UniqueIdProvider | undefined;
 
     return {
@@ -62,12 +64,12 @@ export class Broadcaster<T, SpecT> {
         return this as BroadcasterBuilder<T2, SpecT2>;
       },
 
-      withSubscribers(subscribers: TopicMap<TopicMessage<unknown>>) {
+      withSubscribers(subscribers: TopicMap<ID, TopicMessage<unknown>>) {
         bSubscribers = subscribers;
         return this;
       },
 
-      withTaskQueues(taskQueues: TaskQueueMap<void>) {
+      withTaskQueues(taskQueues: TaskQueueMap<ID, void>) {
         bTaskQueues = taskQueues;
         return this;
       },
@@ -85,7 +87,7 @@ export class Broadcaster<T, SpecT> {
           model,
           bContext,
           bSubscribers || new TrackingTopicMap(() => new InMemoryTopic()),
-          bTaskQueues || new TaskQueueMap<void>(),
+          bTaskQueues || new TaskQueueMap<ID, void>(),
           bIdProvider || new UniqueIdProvider(),
         );
       },
@@ -93,7 +95,7 @@ export class Broadcaster<T, SpecT> {
   }
 
   public async subscribe<MetaT>(
-    id: string,
+    id: ID,
     onChange: (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void,
     permission: Permission<T, SpecT> = ReadWrite,
   ): Promise<Subscription<T, SpecT, MetaT> | null> {
@@ -131,7 +133,7 @@ export class Broadcaster<T, SpecT> {
   }
 
   public update(
-    id: string,
+    id: ID,
     change: SpecT,
     permission: Permission<T, SpecT> = ReadWrite,
   ): Promise<void> {
@@ -139,7 +141,7 @@ export class Broadcaster<T, SpecT> {
   }
 
   private async _internalApplyChange(
-    id: string,
+    id: ID,
     change: SpecT,
     permission: Permission<T, SpecT>,
     source: Identifier,
@@ -173,7 +175,7 @@ export class Broadcaster<T, SpecT> {
   }
 
   private async _internalQueueChange(
-    id: string,
+    id: ID,
     change: SpecT,
     permission: Permission<T, SpecT>,
     source: Identifier,

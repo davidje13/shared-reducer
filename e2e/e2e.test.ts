@@ -22,7 +22,7 @@ describe('e2e', () => {
       changeHandler?: (state: TestT) => void,
     ) => SharedReducer<TestT, Spec<TestT>>;
   }>(async ({ setParameter }) => {
-    const model = new InMemoryModel<TestT>();
+    const model = new InMemoryModel<string, TestT>();
     const broadcaster = Broadcaster.for(model).withReducer<Spec<TestT>>(context).build();
 
     const app = new WebSocketExpress();

@@ -16,7 +16,9 @@ interface Collection<T> {
 
 const ERROR_NOP = (e: Error): Error => e;
 
-export class CollectionStorageModel<T extends object> implements Model<T> {
+export class CollectionStorageModel<T extends object, K extends keyof T & string>
+  implements Model<T[K], T>
+{
   constructor(
     private readonly _collection: Collection<T>,
     private readonly _idCol: keyof T & string,
@@ -25,15 +27,15 @@ export class CollectionStorageModel<T extends object> implements Model<T> {
     private readonly _writeErrorIntercept = ERROR_NOP,
   ) {}
 
-  public async read(id: string): Promise<Readonly<T> | null> {
+  public async read(id: T[K]): Promise<Readonly<T> | null> {
     try {
-      return await this._collection.get(this._idCol, id as any);
+      return await this._collection.get(this._idCol, id);
     } catch (e) {
       throw this._readErrorIntercept(e as Error);
     }
   }
 
-  public async write(id: string, newValue: T, oldValue: T) {
+  public async write(id: T[K], newValue: T, oldValue: T) {
     const diff: Partial<T> = {};
     Object.entries(newValue).forEach(([k, value]) => {
       const key = k as keyof T & string;
@@ -53,7 +55,7 @@ export class CollectionStorageModel<T extends object> implements Model<T> {
     });
 
     try {
-      await this._collection.update(this._idCol, id as any, diff);
+      await this._collection.update(this._idCol, id, diff);
     } catch (e) {
       throw this._writeErrorIntercept(e as Error);
     }

@@ -1,9 +1,9 @@
 import { TaskQueueMap } from './TaskQueueMap';
 import type { Task, TaskQueue } from './TaskQueue';
 
-function setup(): { returnedQueues: FakeQueue<string>[]; map: TaskQueueMap<string> } {
+function setup(): { returnedQueues: FakeQueue<string>[]; map: TaskQueueMap<string, string> } {
   const returnedQueues: FakeQueue<string>[] = [];
-  const map = new TaskQueueMap(() => {
+  const map = new TaskQueueMap<string, string>(() => {
     const queue = new FakeQueue<string>();
     returnedQueues.push(queue);
     return queue;

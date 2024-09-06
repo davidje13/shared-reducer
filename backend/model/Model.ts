@@ -1,7 +1,7 @@
-export interface Model<T> {
+export interface Model<ID, T> {
   validate(v: unknown): Readonly<T>;
 
-  read(id: string): Promise<Readonly<T> | null | undefined> | Readonly<T> | null | undefined;
+  read(id: ID): Promise<Readonly<T> | null | undefined> | Readonly<T> | null | undefined;
 
-  write(id: string, newValue: T, oldValue: T): Promise<void> | void;
+  write(id: ID, newValue: T, oldValue: T): Promise<void> | void;
 }

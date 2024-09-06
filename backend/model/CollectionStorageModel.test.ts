@@ -8,7 +8,7 @@ const connectDB: (typeof cs)['connect'] = (cs as any).default.connect;
 describe('CollectionStorageModel', () => {
   const STORAGE = beforeEach<{
     collection: Collection<TestT>;
-    model: CollectionStorageModel<TestT>;
+    model: CollectionStorageModel<TestT, 'id'>;
   }>(async ({ setParameter }) => {
     const db = await connectDB('memory://');
     const collection = db.getCollection<TestT>('col');
