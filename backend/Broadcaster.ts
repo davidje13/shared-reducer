@@ -11,10 +11,13 @@ export interface Context<T, SpecT> {
   update: (input: T, spec: SpecT) => T;
 }
 
+type Listener<SpecT, MetaT> = (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void;
+
 export interface Subscription<T, SpecT, MetaT> {
-  getInitialData: () => Readonly<T>;
-  send: (change: SpecT, meta?: MetaT) => Promise<void>;
-  close: () => Promise<void>;
+  getInitialData(): Readonly<T>;
+  listen(onChange: Listener<SpecT, MetaT>): void;
+  send(change: SpecT, meta?: MetaT): Promise<void>;
+  close(): Promise<void>;
 }
 
 type Identifier = string | null;
@@ -31,101 +34,87 @@ export interface TopicMessage<SpecT> {
 
 type ID = string;
 
-interface BroadcasterBuilder<T, SpecT> {
-  withReducer<SpecT2 extends SpecT>(context: Context<T, SpecT2>): BroadcasterBuilder<T, SpecT2>;
-
-  withSubscribers(subscribers: TopicMap<ID, TopicMessage<SpecT>>): this;
-
-  withTaskQueues(taskQueues: TaskQueueMap<ID, void>): this;
-
-  withIdProvider(idProvider: UniqueIdProvider): this;
-
-  build(): Broadcaster<T, SpecT>;
-}
-
 export class Broadcaster<T, SpecT> {
-  private constructor(
+  private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>;
+  private readonly _taskQueues: TaskQueueMap<ID, void>;
+  private readonly _idProvider: () => Promise<string> | string;
+
+  public constructor(
     private readonly _model: Model<ID, T>,
     private readonly _context: Context<T, SpecT>,
-    private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>,
-    private readonly _taskQueues: TaskQueueMap<ID, void>,
-    private readonly _idProvider: UniqueIdProvider,
-  ) {}
-
-  public static for<T2>(model: Model<ID, T2>): BroadcasterBuilder<T2, unknown> {
-    let bContext: Context<T2, unknown> | undefined;
-    let bSubscribers: TopicMap<ID, TopicMessage<unknown>> | undefined;
-    let bTaskQueues: TaskQueueMap<ID, void> | undefined;
-    let bIdProvider: UniqueIdProvider | undefined;
-
-    return {
-      withReducer<SpecT2>(context: Context<T2, SpecT2>) {
-        bContext = context as Context<T2, unknown>;
-        return this as BroadcasterBuilder<T2, SpecT2>;
-      },
-
-      withSubscribers(subscribers: TopicMap<ID, TopicMessage<unknown>>) {
-        bSubscribers = subscribers;
-        return this;
-      },
-
-      withTaskQueues(taskQueues: TaskQueueMap<ID, void>) {
-        bTaskQueues = taskQueues;
-        return this;
-      },
-
-      withIdProvider(idProvider: UniqueIdProvider) {
-        bIdProvider = idProvider;
-        return this;
-      },
-
-      build() {
-        if (!bContext) {
-          throw new Error('must set broadcaster context');
-        }
-        return new Broadcaster(
-          model,
-          bContext,
-          bSubscribers || new TrackingTopicMap(() => new InMemoryTopic()),
-          bTaskQueues || new TaskQueueMap<ID, void>(),
-          bIdProvider || new UniqueIdProvider(),
-        );
-      },
-    };
+    options: {
+      subscribers?: TopicMap<ID, TopicMessage<SpecT>>;
+      taskQueues?: TaskQueueMap<ID, void>;
+      idProvider?: () => Promise<string> | string;
+    } = {},
+  ) {
+    this._subscribers = options.subscribers ?? new TrackingTopicMap(() => new InMemoryTopic());
+    this._taskQueues = options.taskQueues ?? new TaskQueueMap<ID, void>();
+    this._idProvider = options.idProvider ?? UniqueIdProvider();
   }
 
-  public async subscribe<MetaT>(
+  public async subscribe<MetaT = void>(
     id: ID,
-    onChange: (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void,
     permission: Permission<T, SpecT> = ReadWrite,
   ): Promise<Subscription<T, SpecT, MetaT> | null> {
-    let initialData = await this._model.read(id);
-    if (initialData === null || initialData === undefined) {
-      return null;
-    }
-
-    const myId = this._idProvider.get();
-    const eventHandler = ({ message, source, meta }: TopicMessage<SpecT>) => {
-      if (source === myId) {
-        onChange(message, meta as MetaT);
-      } else if (message.change) {
-        onChange(message, undefined);
+    let state:
+      | { _stage: 0 }
+      | { _stage: 1; _initialData: Readonly<T>; _queue: TopicMessage<SpecT>[] }
+      | { _stage: 2; _onChange: Listener<SpecT, MetaT> } = { _stage: 0 };
+    let myId = '';
+    const eventHandler = (m: TopicMessage<SpecT>) => {
+      if (state._stage === 2) {
+        // we're up and running
+        if (m.source === myId) {
+          state._onChange(m.message, m.meta as MetaT);
+        } else if (m.message.change) {
+          state._onChange(m.message, undefined);
+        }
+      } else if (state._stage === 1) {
+        // we've loaded the initial data, but haven't yet called listen;
+        // queue the event and we'll re-send it when listen is called.
+        state._queue.push(m);
+      } else {
+        // Oh no! We got an event while fetching the initial data.
+        // we don't know if this event will be reflected in the initial data
+        // (i.e. if it was received during the data REQUEST), or not (i.e.
+        // it it was received during the data RESPONSE).
+        // For now we ignore it (potentially lossy), but this could be fixed
+        // by adding a version identifier to the data and storing these events,
+        // to play back later if their version is > the initialData version.
       }
     };
 
     this._subscribers.add(id, eventHandler);
+    try {
+      const initialData = await this._model.read(id);
+      if (initialData === null || initialData === undefined) {
+        this._subscribers.remove(id, eventHandler);
+        return null;
+      }
+      state = { _stage: 1, _initialData: initialData, _queue: [] };
+      myId = await this._idProvider();
+    } catch (e) {
+      this._subscribers.remove(id, eventHandler);
+      throw e;
+    }
 
     return {
-      getInitialData: (): Readonly<T> => {
-        if (initialData === null) {
-          throw new Error('Already fetched initialData');
+      getInitialData() {
+        if (state._stage !== 1) {
+          throw new Error('Already started');
         }
-        const data = initialData!;
-        initialData = null; // GC
-        return data;
+        return state._initialData;
       },
-      send: (change: SpecT, meta?: MetaT): Promise<void> =>
-        this._internalQueueChange(id, change, permission, myId, meta),
+      listen(onChange) {
+        if (state._stage !== 1) {
+          throw new Error('Already started');
+        }
+        const queue = state._queue;
+        state = { _stage: 2, _onChange: onChange };
+        queue.forEach(eventHandler);
+      },
+      send: (change, meta) => this._internalQueueChange(id, change, permission, myId, meta),
       close: async () => {
         await this._subscribers.remove(id, eventHandler);
       },

@@ -4,11 +4,12 @@ import { InMemoryModel } from './model/InMemoryModel';
 
 describe('Broadcaster', () => {
   it('notifies subscribers of updates', async () => {
-    const { model, broadcaster, subscribe } = setup();
+    const { model, broadcaster, subscribe } = setup(validateTestT);
     const changeListener = mock<ChangeListenerT>();
 
     model.set('a', { foo: 'v1' });
-    const subscription = await subscribe('a', changeListener);
+    const subscription = await subscribe<number>('a');
+    subscription.listen(changeListener);
 
     await broadcaster.update('a', { foo: ['=', 'v2'] });
 
@@ -18,13 +19,13 @@ describe('Broadcaster', () => {
   });
 
   it('rejects subscriptions to unknown keys', async () => {
-    const { broadcaster } = setup();
-    const subscription = await broadcaster.subscribe('nope', () => null);
+    const { broadcaster } = setup(validateTestT);
+    const subscription = await broadcaster.subscribe('nope');
     expect(subscription).toEqual(null);
   });
 
   it('persists changes to the backing storage', async () => {
-    const { model, broadcaster } = setup();
+    const { model, broadcaster } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
     await broadcaster.update('a', { foo: ['=', 'v2'] });
 
@@ -32,28 +33,31 @@ describe('Broadcaster', () => {
   });
 
   it('provides an initial state to new subscribers', async () => {
-    const { model, subscribe } = setup();
+    const { model, subscribe } = setup(validateTestT);
 
     model.set('a', { foo: 'v1' });
-    const subscription = await subscribe('a', () => null);
+    const subscription = await subscribe('a');
 
     expect(subscription.getInitialData()).toEqual({ foo: 'v1' });
 
-    // subsequent requests fail to allow GC cleanup
+    subscription.listen(() => null);
+    // after listening, initial data is purged to allow GC cleanup
     expect(() => subscription.getInitialData()).toThrow();
 
     await subscription.close();
   });
 
   it('shares changes between clients (but not metadata)', async () => {
-    const { model, subscribe } = setup();
+    const { model, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
 
     const changeListener1 = mock<ChangeListenerT>();
-    const subscription1 = await subscribe('a', changeListener1);
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
 
     const changeListener2 = mock<ChangeListenerT>();
-    const subscription2 = await subscribe('a', changeListener2);
+    const subscription2 = await subscribe<number>('a');
+    subscription2.listen(changeListener2);
 
     await subscription1.send({ foo: ['=', 'v2'] }, 20);
 
@@ -64,15 +68,35 @@ describe('Broadcaster', () => {
     await subscription2.close();
   });
 
+  it('queues events received after loading initial data until listen is called', async () => {
+    const { model, broadcaster, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    await broadcaster.update('a', { foo: ['=', 'v2'] }); // not queued
+
+    const changeListener = mock<ChangeListenerT>();
+    const subscription = await subscribe<number>('a');
+
+    await broadcaster.update('a', { foo: ['=', 'v3'] }); // queued
+
+    subscription.listen(changeListener);
+    expect(changeListener).toHaveBeenCalled({ times: 1 });
+    expect(changeListener).toHaveBeenCalledWith({ change: { foo: ['=', 'v3'] } }, undefined);
+
+    await subscription.close();
+  });
+
   it('stops sending changes when the subscription is closed', async () => {
-    const { model, subscribe } = setup();
+    const { model, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
 
     const changeListener1 = mock<ChangeListenerT>();
-    const subscription1 = await subscribe('a', changeListener1);
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
 
     const changeListener2 = mock<ChangeListenerT>();
-    const subscription2 = await subscribe('a', changeListener2);
+    const subscription2 = await subscribe<number>('a');
+    subscription2.listen(changeListener2);
 
     await subscription1.close();
 
@@ -84,14 +108,16 @@ describe('Broadcaster', () => {
   });
 
   it('rejects invalid changes and does not notify others', async () => {
-    const { model, subscribe } = setup();
+    const { model, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
 
     const changeListener1 = mock<ChangeListenerT>();
-    const subscription1 = await subscribe('a', changeListener1);
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
 
     const changeListener2 = mock<ChangeListenerT>();
-    const subscription2 = await subscribe('a', changeListener2);
+    const subscription2 = await subscribe<number>('a');
+    subscription2.listen(changeListener2);
 
     const invalidType = 'eek' as unknown as TestT;
     await subscription1.send(['=', invalidType], 20);
@@ -124,22 +150,19 @@ function validateTestT(x: unknown): TestT {
   return test;
 }
 
-function setup(): {
-  model: InMemoryModel<string, TestT>;
-  broadcaster: Broadcaster<TestT, Spec<TestT>>;
-  subscribe: <MetaT>(
-    id: string,
-    onChange: (message: ChangeInfo<Spec<TestT>>, meta?: MetaT) => void,
-  ) => Promise<Subscription<TestT, Spec<TestT>, MetaT>>;
+function setup<T>(validator: (x: unknown) => T): {
+  model: InMemoryModel<string, T>;
+  broadcaster: Broadcaster<T, Spec<T>>;
+  subscribe<MetaT>(id: string): Promise<Subscription<T, Spec<T>, MetaT>>;
 } {
-  const model = new InMemoryModel<string, TestT>(validateTestT);
-  const broadcaster = Broadcaster.for(model).withReducer<Spec<TestT>>(context).build();
+  const model = new InMemoryModel<string, T>(validator);
+  const broadcaster = new Broadcaster<T, Spec<T>>(model, context);
 
   return {
     model,
     broadcaster,
-    subscribe: async (id, onChange) => {
-      const subscription = await broadcaster.subscribe(id, onChange);
+    async subscribe<MetaT>(id: string) {
+      const subscription = await broadcaster.subscribe<MetaT>(id);
       if (!subscription) {
         throw new Error('Failed to subscribe');
       }

@@ -32,9 +32,7 @@ import context from 'json-immutability-helper';
 import { WebSocketExpress } from 'websocket-express';
 
 const model = new InMemoryModel();
-const broadcaster = Broadcaster.for(model)
-  .withReducer(context)
-  .build();
+const broadcaster = new Broadcaster(model, context);
 model.set('a', { foo: 'v1' });
 
 const app = new WebSocketExpress();
@@ -55,19 +53,15 @@ import { Broadcaster, InMemoryModel } from 'shared-reducer/backend';
 import context from 'json-immutability-helper';
 
 const model = new InMemoryModel();
-const broadcaster = Broadcaster.for(model)
-  .withReducer(context)
-  .build();
+const broadcaster = new Broadcaster(model, context);
 model.set('a', { foo: 'v1' });
 
 // ...
 
-const subscription = await broadcaster.subscribe(
-  'a',
-  (change, meta) => { /*...*/ },
-);
+const subscription = await broadcaster.subscribe('a');
 
 const begin = subscription.getInitialData();
+subscription.listen((change, meta) => { /*...*/ });
 await subscription.send(['=', { foo: 'v2' }]);
 // callback provided earlier is invoked
 
@@ -97,9 +91,7 @@ const model = new CollectionStorageModel(
   // or throws if invalid (protects stored data from malicious changes)
   MY_VALIDATOR,
 );
-const broadcaster = Broadcaster.for(model)
-  .withReducer(context)
-  .build();
+const broadcaster = new Broadcaster(model, context);
 ```
 
 Note that the provided validator MUST verify structural integrity (e.g.
@@ -217,7 +209,7 @@ above, that is
 ## Alternative reducer
 
 To enable different features of `json-immutability-helper`, you can
-customise it before passing it to `withReducer`. For example, to
+customise it before passing it to the constructor. For example, to
 enable list commands such as `updateWhere` and mathematical commands
 such as Reverse Polish Notation (`rpn`):
 
@@ -229,13 +221,14 @@ import listCommands from 'json-immutability-helper/commands/list';
 import mathCommands from 'json-immutability-helper/commands/math';
 import context from 'json-immutability-helper';
 
-const broadcaster = Broadcaster.for(new InMemoryModel())
-  .withReducer(context.with(listCommands, mathCommands))
-  .build();
+const broadcaster = new Broadcaster(
+  new InMemoryModel(),
+  context.with(listCommands, mathCommands),
+);
 ```
 
 If you want to use an entirely different reducer, create a wrapper
-and pass it to `withReducer`:
+and pass it to the constructor:
 
 ```js
 import { Broadcaster, InMemoryModel } from 'shared-reducer/backend';
@@ -256,8 +249,7 @@ const reducer = SharedReducer
   .build();
 ```
 
-If you want to use an entirely different reducer, create a wrapper
-and pass it to `withReducer`:
+If you want to use an entirely different reducer, create a wrapper:
 
 ```js
 import context from 'json-immutability-helper';
@@ -274,9 +266,7 @@ const myReducer = {
 };
 
 // backend
-const broadcaster = Broadcaster.for(new InMemoryModel())
-  .withReducer(myReducer)
-  .build();
+const broadcaster = new Broadcaster(new InMemoryModel(), myReducer);
 
 // frontend
 const reducer = SharedReducer
@@ -292,9 +282,14 @@ as code injection or prototype pollution.
 
 ## Other customisations (Backend)
 
-The `Broadcaster` builder has other settable properties:
+The `Broadcaster` constructor can also take some optional
+arguments:
 
-- `withSubscribers`: specify a custom keyed broadcaster, used
+```javascript
+new Broadcaster(model, reducer[, options]);
+```
+
+- `options.subscribers`: specify a custom keyed broadcaster, used
   for communicating changes to all consumers. Required interface:
 
   ```js
@@ -319,7 +314,7 @@ The `Broadcaster` builder has other settable properties:
   note that in most cases you probably want to load balance
   _documents_ rather than _users_ for better scalability.
 
-- `withTaskQueues`: specify a custom task queue, used to ensure
+- `options.taskQueues`: specify a custom task queue, used to ensure
   operations happen in the correct order. Required interface:
 
   ```js
@@ -337,20 +332,13 @@ The `Broadcaster` builder has other settable properties:
   the existing tasks have finished. Once all tasks for a
   particular key have finished, it will remove the queue.
 
-  As with `withSubscribers`, the main reason to override
-  this is to provide consistency if multiple servers are
-  able to modify the same document simultaneously.
+  As with `subscribers`, the main reason to override this is to
+  provide consistency if multiple servers are able to modify the
+  same document simultaneously.
 
-- `withIdProvider`: specify a custom unique ID provider.
-  Required interface:
-
-  ```js
-  {
-    get() {
-      // return a unique string (must be synchronous)
-    },
-  }
-  ```
+- `options.idProvider`: specify a custom unique ID provider.
+  Must be a function which returns a unique string ID when called.
+  Can be asynchronous.
 
   The returned ID is used internally and passed through
   the configured `taskQueues` to identify the source of

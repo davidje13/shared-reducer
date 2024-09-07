@@ -22,7 +22,7 @@ describe('websocketHandler', () => {
       const model = new InMemoryModel(validateTestT);
       model.set('a', { foo: 'v1' });
 
-      const broadcaster = Broadcaster.for(model).withReducer<Spec<TestT>>(context).build();
+      const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
       const handler = websocketHandler(broadcaster);
 
       app.ws(
