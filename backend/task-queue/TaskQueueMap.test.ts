@@ -1,10 +1,10 @@
 import { TaskQueueMap } from './TaskQueueMap';
 import type { Task, TaskQueue } from './TaskQueue';
 
-function setup(): { returnedQueues: FakeQueue<string>[]; map: TaskQueueMap<string, string> } {
-  const returnedQueues: FakeQueue<string>[] = [];
-  const map = new TaskQueueMap<string, string>(() => {
-    const queue = new FakeQueue<string>();
+function setup(): { returnedQueues: FakeQueue[]; map: TaskQueueMap<string> } {
+  const returnedQueues: FakeQueue[] = [];
+  const map = new TaskQueueMap<string>(() => {
+    const queue = new FakeQueue();
     returnedQueues.push(queue);
     return queue;
   });
@@ -58,11 +58,15 @@ describe('TaskQueueMap', () => {
   });
 });
 
-class FakeQueue<T> extends EventTarget implements TaskQueue<T> {
+class FakeQueue extends EventTarget implements TaskQueue {
   public taskCount = 0;
 
-  public push(task: Task<T>): Promise<T> {
+  public async push<T>(task: Task<T>): Promise<T> {
     this.taskCount += 1;
     return task();
+  }
+
+  public active() {
+    return false;
   }
 }

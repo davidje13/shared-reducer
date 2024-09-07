@@ -36,7 +36,7 @@ type ID = string;
 
 export class Broadcaster<T, SpecT> {
   private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>;
-  private readonly _taskQueues: TaskQueueMap<ID, void>;
+  private readonly _taskQueues: TaskQueueMap<ID>;
   private readonly _idProvider: () => Promise<string> | string;
 
   public constructor(
@@ -44,12 +44,12 @@ export class Broadcaster<T, SpecT> {
     private readonly _context: Context<T, SpecT>,
     options: {
       subscribers?: TopicMap<ID, TopicMessage<SpecT>>;
-      taskQueues?: TaskQueueMap<ID, void>;
+      taskQueues?: TaskQueueMap<ID>;
       idProvider?: () => Promise<string> | string;
     } = {},
   ) {
     this._subscribers = options.subscribers ?? new TrackingTopicMap(() => new InMemoryTopic());
-    this._taskQueues = options.taskQueues ?? new TaskQueueMap<ID, void>();
+    this._taskQueues = options.taskQueues ?? new TaskQueueMap<ID>();
     this._idProvider = options.idProvider ?? UniqueIdProvider();
   }
 
@@ -74,28 +74,23 @@ export class Broadcaster<T, SpecT> {
         // we've loaded the initial data, but haven't yet called listen;
         // queue the event and we'll re-send it when listen is called.
         state._queue.push(m);
-      } else {
-        // Oh no! We got an event while fetching the initial data.
-        // we don't know if this event will be reflected in the initial data
-        // (i.e. if it was received during the data REQUEST), or not (i.e.
-        // it it was received during the data RESPONSE).
-        // For now we ignore it (potentially lossy), but this could be fixed
-        // by adding a version identifier to the data and storing these events,
-        // to play back later if their version is > the initialData version.
       }
     };
 
-    this._subscribers.add(id, eventHandler);
     try {
-      const initialData = await this._model.read(id);
-      if (initialData === null || initialData === undefined) {
-        this._subscribers.remove(id, eventHandler);
+      await this._taskQueues.push(id, async () => {
+        const data = await this._model.read(id);
+        if (data !== null && data !== undefined) {
+          state = { _stage: 1, _initialData: data, _queue: [] };
+          await this._subscribers.add(id, eventHandler);
+        }
+      });
+      if (state._stage === 0) {
         return null;
       }
-      state = { _stage: 1, _initialData: initialData, _queue: [] };
       myId = await this._idProvider();
     } catch (e) {
-      this._subscribers.remove(id, eventHandler);
+      await this._subscribers.remove(id, eventHandler);
       throw e;
     }
 

@@ -82,7 +82,7 @@ describe('websocketHandler', () => {
   it('handles errors from the idGetter', async ({ getTyped }) => {
     const server = getTyped(SERVER_FACTORY)(ReadWrite);
 
-    await request(server).ws('/error').expectJson({ error: 'oops' });
+    await request(server).ws('/error').expectConnectionError(500);
   });
 
   it('rejects changes in read-only mode', async ({ getTyped }) => {
