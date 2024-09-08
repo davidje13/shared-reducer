@@ -2,7 +2,7 @@ export type Lock = <R>(action: () => R) => R;
 
 export function lock(errorMessage: string): Lock {
   let locked = false;
-  return <R>(action: () => R): R => {
+  return (action) => {
     if (locked) {
       throw new Error(errorMessage);
     }

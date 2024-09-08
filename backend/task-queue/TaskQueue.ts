@@ -1,4 +1,6 @@
-export type Task<T> = () => Promise<T> | T;
+import type { MaybePromise } from '../helpers/MaybePromise';
+
+export type Task<T> = () => MaybePromise<T>;
 
 export interface TaskQueue extends EventTarget {
   push<T>(task: Task<T>): Promise<T>;

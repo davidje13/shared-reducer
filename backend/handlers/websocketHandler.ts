@@ -1,11 +1,10 @@
 import { unpackMessage } from './Message';
 import type { Broadcaster } from '../Broadcaster';
 import type { Permission } from '../permission/Permission';
+import type { MaybePromise } from '../helpers/MaybePromise';
 
 export const PING = 'P';
 export const PONG = 'p';
-
-type MaybePromise<T> = Promise<T> | T;
 
 interface ServerWebSocket {
   on(event: 'close', listener: () => void): void;

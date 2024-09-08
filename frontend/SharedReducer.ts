@@ -1,9 +1,11 @@
 import type { Context, Dispatch, SpecSource, SyncCallback } from './DispatchSpec';
-import { WebSocketConnection } from './WebSocketConnection';
 import { reduce } from './reduce';
 import { actionsSyncedCallback } from './actions/actionsSyncedCallback';
 import { idProvider } from './idProvider';
 import { lock } from './lock';
+import { ReconnectingWebSocket } from './ReconnectingWebSocket';
+import type { MaybePromise } from './helpers/MaybePromise';
+import { AT_LEAST_ONCE, type ReconnectionStrategy } from './reconnection/strategies';
 
 interface InitEvent<T> {
   init: T;
@@ -15,10 +17,18 @@ interface ChangeEvent<SpecT> {
   id?: number;
 }
 
+interface ApiError {
+  error: string;
+  id?: number;
+}
+
+type ServerEvent<T, SpecT> = InitEvent<T> | ChangeEvent<SpecT> | ApiError;
+
 interface LocalChange<T, SpecT> {
   change: SpecT;
   id: number;
   syncCallbacks: SyncCallback<T>[];
+  sent: boolean;
 }
 
 interface LocalChangeIndex<T, SpecT> {
@@ -26,30 +36,13 @@ interface LocalChangeIndex<T, SpecT> {
   index: number;
 }
 
-interface ApiError {
-  error: string;
-  id?: number;
-}
-
 interface State<T> {
   readonly server: T;
   readonly local: T;
 }
 
-interface SharedReducerBuilder<T, SpecT> {
-  withReducer<SpecT2 extends SpecT>(context: Context<T, SpecT2>): SharedReducerBuilder<T, SpecT2>;
-
-  withToken(token: string): this;
-
-  withErrorHandler(handler: (error: string) => void): this;
-
-  withWarningHandler(handler: (error: string) => void): this;
-
-  build(): SharedReducer<T, SpecT>;
-}
-
-export class SharedReducer<T, SpecT> {
-  private readonly _connection: WebSocketConnection;
+export class SharedReducer<T, SpecT> extends EventTarget {
+  private readonly _ws: ReconnectingWebSocket;
 
   private _latestStates: State<T> | null = null;
 
@@ -61,74 +54,123 @@ export class SharedReducer<T, SpecT> {
 
   private _pendingChanges: SpecSource<T, SpecT>[] = [];
 
+  private readonly _listeners: Set<(state: T) => void> = new Set();
+
   private readonly _dispatchLock = lock('Cannot dispatch recursively');
 
   private readonly _nextId = idProvider();
 
-  private constructor(
+  public constructor(
     private readonly _context: Context<T, SpecT>,
-    wsUrl: string,
-    token: string | undefined,
-    private readonly _changeHandler: ((state: T) => void) | undefined,
-    errorHandler: ((error: string) => void) | undefined,
-    private readonly _warningHandler: ((error: string) => void) | undefined,
+    connectionGetter: () => MaybePromise<{ url: string; token?: string }>,
+    private readonly _reconnectionStrategy: ReconnectionStrategy<T, SpecT> = AT_LEAST_ONCE,
   ) {
-    this._connection = new WebSocketConnection(wsUrl, token, this._handleMessage, errorHandler);
+    super();
+    this._ws = new ReconnectingWebSocket(connectionGetter);
+    this._ws.addEventListener('message', this._handleMessage);
+    this._ws.addEventListener('connected', this._forwardEvent);
+    this._ws.addEventListener('disconnected', this._forwardEvent);
   }
 
-  public static for<T2>(
-    wsUrl: string,
-    changeHandler?: (state: T2) => void,
-  ): SharedReducerBuilder<T2, unknown> {
-    let bContext: Context<T2, unknown>;
-    let bToken: string;
-    let bErrorHandler: (error: string) => void;
-    let bWarningHandler: (error: string) => void;
+  private readonly _handleMessage = (e: Event) => {
+    const message = JSON.parse((e as CustomEvent).detail) as ServerEvent<T, SpecT>;
+    if ('change' in message) {
+      this._handleChangeMessage(message);
+    } else if ('init' in message) {
+      this._handleInitMessage(message);
+    } else if ('error' in message) {
+      this._handleErrorMessage(message);
+    } else {
+      this.dispatchEvent(
+        new CustomEvent('warning', {
+          detail: new Error(`Ignoring unknown API message: ${JSON.stringify(message)}`),
+        }),
+      );
+    }
+  };
 
-    return {
-      withReducer<SpecT2>(context: Context<T2, SpecT2>) {
-        bContext = context as Context<T2, unknown>;
-        return this as SharedReducerBuilder<T2, SpecT2>;
-      },
+  private _handleInitMessage(message: InitEvent<T>) {
+    this._localChanges = this._localChanges.filter((c) => {
+      if (this._reconnectionStrategy(message.init, c.change, c.sent)) {
+        return true;
+      }
+      c.syncCallbacks.forEach((fn) => fn.reject('message possibly lost'));
+      return false;
+    });
+    this._latestStates = this._applySpecs(this._computeLocal(message.init), this._pendingChanges);
+    this._pendingChanges.length = 0;
+    this._sendState(this._latestStates.local);
 
-      withToken(token: string) {
-        bToken = token;
-        return this;
-      },
-
-      withErrorHandler(handler: (error: string) => void) {
-        bErrorHandler = handler;
-        return this;
-      },
-
-      withWarningHandler(handler: (error: string) => void) {
-        bWarningHandler = handler;
-        return this;
-      },
-
-      build() {
-        if (!bContext) {
-          throw new Error('must set broadcaster context');
-        }
-        return new SharedReducer(
-          bContext,
-          wsUrl,
-          bToken,
-          changeHandler,
-          bErrorHandler,
-          bWarningHandler,
-        );
-      },
-    };
+    if (this._ws.isConnected()) {
+      for (const { change, id } of this._localChanges) {
+        this._ws.send(JSON.stringify({ change, id }));
+      }
+    }
   }
 
-  public close() {
-    this._connection.close();
-    this._latestStates = null;
-    this._currentChange = undefined;
-    this._currentSyncCallbacks = [];
-    this._localChanges = [];
-    this._pendingChanges = [];
+  private _handleChangeMessage(message: ChangeEvent<SpecT>) {
+    if (!this._latestStates) {
+      this.dispatchEvent(
+        new CustomEvent('warning', {
+          detail: new Error(`Ignoring change before init: ${JSON.stringify(message)}`),
+        }),
+      );
+      return;
+    }
+
+    const { localChange, index } = this._popLocalChange(message.id);
+
+    const server = this._context.update(this._latestStates.server, message.change);
+
+    if (index === 0) {
+      // just removed the oldest pending change and applied it to
+      // the base server state: nothing has changed
+      this._latestStates = { server, local: this._latestStates.local };
+    } else {
+      this._latestStates = this._computeLocal(server);
+      this._sendState(this._latestStates.local);
+    }
+    const state = this._latestStates.local;
+    localChange?.syncCallbacks.forEach((callback) => callback.sync(state));
+  }
+
+  private _handleErrorMessage(message: ApiError) {
+    const { localChange } = this._popLocalChange(message.id);
+    if (!localChange) {
+      this.dispatchEvent(
+        new CustomEvent('warning', {
+          detail: new Error(`API sent error: ${message.error}`),
+        }),
+      );
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent('warning', {
+        detail: new Error(`API rejected update: ${message.error}`),
+      }),
+    );
+    if (this._latestStates) {
+      this._latestStates = this._computeLocal(this._latestStates.server);
+      this._sendState(this._latestStates.local);
+    }
+    localChange.syncCallbacks.forEach((fn) => fn.reject(message.error));
+  }
+
+  public addStateListener(listener: (state: T) => void) {
+    this._listeners.add(listener);
+    if (this._latestStates !== null) {
+      listener(this._latestStates.local);
+    }
+  }
+
+  public removeStateListener(listener: (state: T) => void) {
+    this._listeners.delete(listener);
+  }
+
+  private _sendState(state: T) {
+    for (const listener of this._listeners) {
+      listener(state);
+    }
   }
 
   public dispatch: Dispatch<T, SpecT> = (specs) => {
@@ -140,7 +182,7 @@ export class SharedReducer<T, SpecT> {
       const updatedState = this._applySpecs(this._latestStates, specs);
       if (updatedState !== this._latestStates) {
         this._latestStates = updatedState;
-        this._changeHandler?.(updatedState.local);
+        this._sendState(updatedState.local);
       }
     } else {
       this._pendingChanges.push(...specs);
@@ -172,8 +214,12 @@ export class SharedReducer<T, SpecT> {
     this._currentChange = undefined;
     this._currentSyncCallbacks = [];
 
-    this._localChanges.push({ change, id, syncCallbacks });
-    this._connection.send({ change, id });
+    const localChange: LocalChange<T, SpecT> = { change, id, syncCallbacks, sent: false };
+    if (this._ws.isConnected()) {
+      localChange.sent = true;
+      this._ws.send(JSON.stringify({ change, id }));
+    }
+    this._localChanges.push(localChange);
   };
 
   private _addCurrentChange(spec: SpecT) {
@@ -223,60 +269,6 @@ export class SharedReducer<T, SpecT> {
     };
   }
 
-  private _handleErrorMessage(message: ApiError) {
-    const { localChange } = this._popLocalChange(message.id);
-    if (!localChange) {
-      this._warningHandler?.(`API sent error: ${message.error}`);
-      return;
-    }
-    this._warningHandler?.(`API rejected update: ${message.error}`);
-    if (this._latestStates) {
-      this._latestStates = this._computeLocal(this._latestStates.server);
-      this._changeHandler?.(this._latestStates.local);
-    }
-    localChange.syncCallbacks.forEach((fn) => fn.reject(message.error));
-  }
-
-  private _handleInitMessage(message: InitEvent<T>) {
-    this._latestStates = this._applySpecs(this._computeLocal(message.init), this._pendingChanges);
-    this._pendingChanges.length = 0;
-    this._changeHandler?.(this._latestStates.local);
-  }
-
-  private _handleChangeMessage(message: ChangeEvent<SpecT>) {
-    if (!this._latestStates) {
-      this._warningHandler?.(`Ignoring change before init: ${JSON.stringify(message)}`);
-      return;
-    }
-
-    const { localChange, index } = this._popLocalChange(message.id);
-
-    const server = this._context.update(this._latestStates.server, message.change);
-
-    if (index === 0) {
-      // just removed the oldest pending change and applied it to
-      // the base server state: nothing has changed
-      this._latestStates = { server, local: this._latestStates.local };
-    } else {
-      this._latestStates = this._computeLocal(server);
-      this._changeHandler?.(this._latestStates.local);
-    }
-    const state = this._latestStates.local;
-    localChange?.syncCallbacks.forEach((callback) => callback.sync(state));
-  }
-
-  private _handleMessage = (message: unknown) => {
-    if (Object.prototype.hasOwnProperty.call(message, 'change')) {
-      this._handleChangeMessage(message as ChangeEvent<SpecT>);
-    } else if (Object.prototype.hasOwnProperty.call(message, 'init')) {
-      this._handleInitMessage(message as InitEvent<T>);
-    } else if (Object.prototype.hasOwnProperty.call(message, 'error')) {
-      this._handleErrorMessage(message as ApiError);
-    } else {
-      this._warningHandler?.(`Ignoring unknown API message: ${JSON.stringify(message)}`);
-    }
-  };
-
   private _computeLocal(server: T): State<T> {
     let local = server;
     if (this._localChanges.length > 0) {
@@ -287,5 +279,21 @@ export class SharedReducer<T, SpecT> {
       local = this._context.update(local, this._currentChange);
     }
     return { server, local };
+  }
+
+  private readonly _forwardEvent = (e: Event) => {
+    this.dispatchEvent(new CustomEvent(e.type, { detail: (e as CustomEvent).detail }));
+  };
+
+  public close() {
+    this._ws.close();
+    this._latestStates = null;
+    this._currentChange = undefined;
+    this._currentSyncCallbacks = [];
+    this._localChanges = [];
+    this._pendingChanges = [];
+    this._ws.removeEventListener('message', this._handleMessage);
+    this._ws.removeEventListener('connected', this._forwardEvent);
+    this._ws.removeEventListener('disconnected', this._forwardEvent);
   }
 }

@@ -10,12 +10,14 @@ export class TaskQueueMap<K> {
     let q = this._queues.get(key);
     if (!q) {
       const queue = this._queueFactory();
-      queue.addEventListener('drain', () => {
+      const handleDrain = () => {
         // confirm queue has not picked up new items since the drain event was dispatched
         if (!queue.active()) {
           this._queues.delete(key);
+          queue.removeEventListener('drain', handleDrain);
         }
-      });
+      };
+      queue.addEventListener('drain', handleDrain);
       this._queues.set(key, queue);
       q = queue;
     }

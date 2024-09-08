@@ -103,15 +103,26 @@ ensuring no unexpected fields are added or types are changed).
 import { SharedReducer, actionsHandledCallback, actionsSyncedCallback } from 'shared-reducer/frontend';
 import context from 'json-immutability-helper';
 
-const reducer = SharedReducer
-  .for('ws://destination', (state) => {
-    console.log('latest state is', state);
-  })
-  .withReducer(context)
-  .withToken('my-token')
-  .withErrorHandler((error) => { console.log('connection lost', error); })
-  .withWarningHandler((warning) => { console.log('latest change failed', warning); })
-  .build();
+const reducer = new SharedReducer(context, () => ({
+  url: 'ws://destination',
+  token: 'my-token',
+}));
+
+reducer.addStateListener((state) => {
+  console.log('latest state is', state);
+});
+
+reducer.addEventListener('connected', () => {
+  console.log('connected / reconnected');
+});
+
+reducer.addEventListener('disconnected', () => {
+  console.log('connection lost');
+});
+
+reducer.addEventListener('warning', (e) => {
+  console.log('latest change failed', e.detail);
+});
 
 const dispatch = reducer.dispatch;
 
@@ -121,9 +132,7 @@ dispatch([
 
 dispatch([
   (state) => {
-    return {
-      a: ['=', Math.pow(2, state.a)],
-    };
+    return [{ a: ['=', Math.pow(2, state.a)] }];
   },
 ]);
 
@@ -243,10 +252,10 @@ import listCommands from 'json-immutability-helper/commands/list';
 import mathCommands from 'json-immutability-helper/commands/math';
 import context from 'json-immutability-helper';
 
-const reducer = SharedReducer
-  .for('ws://destination', (state) => {})
-  .withReducer(context.with(listCommands, mathCommands))
-  .build();
+const reducer = new SharedReducer(
+  context.with(listCommands, mathCommands),
+  () => ({ url: 'ws://destination' }),
+);
 ```
 
 If you want to use an entirely different reducer, create a wrapper:
@@ -269,10 +278,10 @@ const myReducer = {
 const broadcaster = new Broadcaster(new InMemoryModel(), myReducer);
 
 // frontend
-const reducer = SharedReducer
-  .for('ws://destination', (state) => {})
-  .withReducer(myReducer)
-  .build();
+const reducer = new SharedReducer(
+  myReducer,
+  () => ({ url: 'ws://destination' }),
+);
 ```
 
 Be careful when using your own reducer to avoid introducing

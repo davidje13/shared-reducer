@@ -6,6 +6,7 @@ import { InMemoryTopic } from './topic/InMemoryTopic';
 import type { Permission } from './permission/Permission';
 import { ReadWrite } from './permission/ReadWrite';
 import type { Model } from './model/Model';
+import type { MaybePromise } from './helpers/MaybePromise';
 
 export interface Context<T, SpecT> {
   update: (input: T, spec: SpecT) => T;
@@ -37,7 +38,7 @@ type ID = string;
 export class Broadcaster<T, SpecT> {
   private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>;
   private readonly _taskQueues: TaskQueueMap<ID>;
-  private readonly _idProvider: () => Promise<string> | string;
+  private readonly _idProvider: () => MaybePromise<string>;
 
   public constructor(
     private readonly _model: Model<ID, T>,
@@ -45,7 +46,7 @@ export class Broadcaster<T, SpecT> {
     options: {
       subscribers?: TopicMap<ID, TopicMessage<SpecT>>;
       taskQueues?: TaskQueueMap<ID>;
-      idProvider?: () => Promise<string> | string;
+      idProvider?: () => MaybePromise<string>;
     } = {},
   ) {
     this._subscribers = options.subscribers ?? new TrackingTopicMap(() => new InMemoryTopic());

@@ -17,7 +17,6 @@ describe('e2e', () => {
     broadcaster: Broadcaster<TestT, Spec<TestT>>;
     getReducer: (
       path: string,
-      errorHandler: (error: string) => void,
       warningHandler: (warning: string) => void,
       changeHandler?: (state: TestT) => void,
     ) => SharedReducer<TestT, Spec<TestT>>;
@@ -49,12 +48,14 @@ describe('e2e', () => {
 
     setParameter({
       broadcaster,
-      getReducer: (path, errorHandler, warningHandler, changeHandler) => {
-        const r = SharedReducer.for(host + path, changeHandler)
-          .withReducer<Spec<TestT>>(context)
-          .withErrorHandler(errorHandler)
-          .withWarningHandler(warningHandler)
-          .build();
+      getReducer: (path, warningHandler, changeHandler) => {
+        const r = new SharedReducer<TestT, Spec<TestT>>(context, () => ({ url: host + path }));
+        r.addEventListener('warning', (e) =>
+          warningHandler(((e as CustomEvent).detail as Error).message),
+        );
+        if (changeHandler) {
+          r.addStateListener(changeHandler);
+        }
         reducers.push(r);
         return r;
       },
@@ -69,20 +70,20 @@ describe('e2e', () => {
   describe('one client', () => {
     it('sends initial state from server to client', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const initialState = await new Promise((resolve) => getReducer('/a', fail, fail, resolve));
+      const initialState = await new Promise((resolve) => getReducer('/a', fail, resolve));
       expect(initialState).toEqual({ foo: 'v1', bar: 10 });
     });
 
     it('invokes synchronize callbacks when state is first retrieved', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       const state = await reducer.syncedState();
       expect(state).toEqual({ foo: 'v1', bar: 10 });
     });
 
     it('reflects state changes back to the sender', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([{ foo: ['=', 'v2'] }]);
@@ -93,7 +94,7 @@ describe('e2e', () => {
 
     it('accepts chained specs', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([{ bar: ['=', 1] }, { bar: ['+', 2] }, { bar: ['+', 3] }]);
@@ -105,7 +106,7 @@ describe('e2e', () => {
 
     it('accepts spec generator functions', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([() => [{ bar: ['=', 2] }]]);
@@ -116,7 +117,7 @@ describe('e2e', () => {
 
     it('provides current state to state generator functions', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([{ bar: ['=', 5] }]);
@@ -130,7 +131,7 @@ describe('e2e', () => {
       getTyped,
     }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([{ bar: ['=', 5] }, (state) => [{ bar: ['=', state.bar * 3] }]]);
@@ -141,7 +142,7 @@ describe('e2e', () => {
 
     it('passes state from previous generators to subsequent generators', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([
@@ -160,7 +161,7 @@ describe('e2e', () => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
       const syncedState = await new Promise((resolve) => {
         let waiting = false;
-        const reducer = getReducer('/a', fail, fail, (state) => {
+        const reducer = getReducer('/a', fail, (state) => {
           if (waiting) {
             resolve(state);
           }
@@ -176,7 +177,7 @@ describe('e2e', () => {
 
     it('merges external state changes', async ({ getTyped }) => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       await broadcaster.update('a', { foo: ['=', 'v2'] });
@@ -188,7 +189,7 @@ describe('e2e', () => {
 
     it('maintains local state changes until the server syncs', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       reducer.dispatch([{ foo: ['=', 'v2'] }]);
@@ -197,7 +198,7 @@ describe('e2e', () => {
 
     it('applies local state changes on top of the server state', async ({ getTyped }) => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail, fail);
+      const reducer = getReducer('/a', fail);
       await reducer.syncedState();
 
       await broadcaster.update('a', { bar: ['=', 20] });
@@ -214,7 +215,7 @@ describe('e2e', () => {
     it('invokes the warning callback when the server rejects a change', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       await new Promise<void>((resolve) => {
-        const reducer = getReducer('/a/read', fail, (warning: string) => {
+        const reducer = getReducer('/a/read', (warning: string) => {
           expect(warning).toEqual('API rejected update: Cannot modify data');
           resolve();
         });
@@ -225,7 +226,7 @@ describe('e2e', () => {
 
     it('rolls back local change when rejected by server', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a/read', fail, () => null);
+      const reducer = getReducer('/a/read', () => null);
       await reducer.syncedState();
 
       reducer.dispatch([{ bar: ['=', 11] }]);
@@ -237,7 +238,7 @@ describe('e2e', () => {
 
     it('rejects sync promises when rejected by server', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a/read', fail, () => null);
+      const reducer = getReducer('/a/read', () => null);
       await reducer.syncedState();
 
       reducer.dispatch([{ bar: ['=', 11] }]);
@@ -249,8 +250,8 @@ describe('e2e', () => {
   describe('two clients', () => {
     it('pushes changes between clients', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      const reducer1 = getReducer('/a', fail, fail);
-      const reducer2 = getReducer('/a', fail, fail);
+      const reducer1 = getReducer('/a', fail);
+      const reducer2 = getReducer('/a', fail);
       await reducer1.syncedState();
       await reducer2.syncedState();
 
