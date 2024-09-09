@@ -1,5 +1,6 @@
+import type { Server } from 'node:http';
+import type { Server as NetServer } from 'node:net';
 import type { Application } from 'express';
-import type { Server } from 'http';
 
 export function runLocalServer(app: Application): Promise<Server> {
   return new Promise((resolve) => {
@@ -9,7 +10,7 @@ export function runLocalServer(app: Application): Promise<Server> {
   });
 }
 
-export function closeServer(server: Server) {
+export function closeServer(server: NetServer) {
   return new Promise<void>((resolve, reject) =>
     server.close((err) => {
       if (err) {
@@ -21,7 +22,7 @@ export function closeServer(server: Server) {
   );
 }
 
-export function getAddress(server: Server, protocol = 'http'): string {
+export function getAddress(server: NetServer, protocol = 'http'): string {
   const addr = server.address();
   if (!addr) {
     throw new Error('server not started');

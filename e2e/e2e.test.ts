@@ -5,22 +5,35 @@ import { WebSocket } from 'ws';
 import 'lean-test';
 
 import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverRunner';
-import { Broadcaster, websocketHandler, InMemoryModel, ReadWrite, ReadOnly } from '../backend';
-import { SharedReducer } from '../frontend';
+import { makeBreakableTcpProxy } from '../test-helpers/breakableTcpProxy';
+import {
+  Broadcaster,
+  websocketHandler,
+  InMemoryModel,
+  ReadWrite,
+  ReadOnly,
+  type ChangeInfo,
+} from '../backend';
+import { AT_LEAST_ONCE, SharedReducer, type ReconnectionStrategy } from '../frontend';
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
 }
 
+interface Context {
+  broadcaster: Broadcaster<TestT, Spec<TestT>>;
+  peekState(id: string): Promise<TestT | null>;
+  getReducer(
+    path: string,
+    warningHandler: (warning: string) => void,
+    changeHandler?: (state: TestT) => void,
+    reconnectionStrategy?: ReconnectionStrategy<TestT, Spec<TestT>>,
+  ): SharedReducer<TestT, Spec<TestT>>;
+  setNetworkAvailable(up: boolean): void;
+}
+
 describe('e2e', () => {
-  const CONTEXT = beforeEach<{
-    broadcaster: Broadcaster<TestT, Spec<TestT>>;
-    getReducer: (
-      path: string,
-      warningHandler: (warning: string) => void,
-      changeHandler?: (state: TestT) => void,
-    ) => SharedReducer<TestT, Spec<TestT>>;
-  }>(async ({ setParameter }) => {
+  const CONTEXT = beforeEach<Context>(async ({ setParameter }) => {
     const model = new InMemoryModel<string, TestT>();
     const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
 
@@ -43,13 +56,29 @@ describe('e2e', () => {
 
     model.set('a', { foo: 'v1', bar: 10 });
     const server = await runLocalServer(app);
-    const host = getAddress(server, 'ws');
+    const proxy = await makeBreakableTcpProxy(server.address());
+    const host = getAddress(proxy.server, 'ws');
     const reducers: SharedReducer<any, any>[] = [];
 
     setParameter({
       broadcaster,
-      getReducer: (path, warningHandler, changeHandler) => {
-        const r = new SharedReducer<TestT, Spec<TestT>>(context, () => ({ url: host + path }));
+      peekState: async (id) => {
+        const s = await broadcaster.subscribe(id);
+        if (!s) {
+          return null;
+        }
+        try {
+          return s.getInitialData();
+        } finally {
+          await s.close();
+        }
+      },
+      getReducer: (path, warningHandler, changeHandler, reconnectionStrategy) => {
+        const r = new SharedReducer<TestT, Spec<TestT>>(
+          context,
+          () => ({ url: host + path }),
+          reconnectionStrategy,
+        );
         r.addEventListener('warning', (e) =>
           warningHandler(((e as CustomEvent).detail as Error).message),
         );
@@ -59,11 +88,13 @@ describe('e2e', () => {
         reducers.push(r);
         return r;
       },
+      setNetworkAvailable: proxy.setConnected,
     });
 
-    return () => {
+    return async () => {
       reducers.forEach((r) => r.close());
-      return closeServer(server);
+      await proxy.close();
+      await closeServer(server);
     };
   });
 
@@ -208,6 +239,45 @@ describe('e2e', () => {
 
       await reducer.syncedState();
       expect(reducer.getState()!.bar).toEqual(25); // now synced, local change applies on top
+    });
+
+    it('reconnects and resends changes if the connection is lost', async ({ getTyped }) => {
+      const { getReducer, broadcaster, peekState, setNetworkAvailable } = getTyped(CONTEXT);
+
+      const specs: ChangeInfo<Spec<TestT>>[] = [];
+      const s = await broadcaster.subscribe('a');
+      if (!s) {
+        return fail();
+      }
+      s.listen((s) => specs.push(s));
+
+      const reducer = getReducer('/a', fail, () => null, AT_LEAST_ONCE);
+      reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
+      expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
+      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+
+      reducer.dispatch([{ bar: ['=', 2] }]);
+      setNetworkAvailable(false);
+      reducer.dispatch([{ foo: ['=', 'while offline'] }]);
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(reducer.getState()).toEqual({ foo: 'while offline', bar: 2 });
+      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+      expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
+
+      setNetworkAvailable(true);
+      // TODO: seems syncedState() does not actually wait for the connection to be reestablished
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
+
+      expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
+      expect(specs).toEqual([
+        { change: ['=', { foo: 'while online', bar: 1 }] },
+        { change: { bar: ['=', 2], foo: ['=', 'while offline'] } },
+      ]);
+
+      s.close();
     });
   });
 

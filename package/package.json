@@ -7,9 +7,9 @@
   "devDependencies": {
     "@types/express": "4.x",
     "@types/react": "18.x",
-    "json-immutability-helper": "3.x",
+    "json-immutability-helper": "4.x",
     "shared-reducer": "file:shared-reducer.tgz",
-    "typescript": "5.5.x",
+    "typescript": "5.6.x",
     "websocket-express": "3.x"
   }
 }

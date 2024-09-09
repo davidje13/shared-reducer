@@ -48,14 +48,14 @@
     "@rollup/plugin-terser": "0.4.x",
     "@rollup/plugin-typescript": "11.x",
     "collection-storage": "3.x",
-    "json-immutability-helper": "3.x",
+    "json-immutability-helper": "4.x",
     "lean-test": "2.x",
     "prettier": "3.3.3",
     "rollup": "4.x",
     "rollup-plugin-dts": "6.x",
     "superwstest": "2.x",
     "tslib": "2.7.x",
-    "typescript": "5.5.x",
+    "typescript": "5.6.x",
     "websocket-express": "3.x"
   }
 }

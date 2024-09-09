@@ -40,4 +40,4 @@ dispatch([
   }),
 ]);
 
-dispatch([{ a: ['add', 1] }, { a: ['add', 1] }]);
+dispatch([{ a: ['+', 1] }, { a: ['+', 1] }]);
