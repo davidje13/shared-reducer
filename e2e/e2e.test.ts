@@ -5,7 +5,7 @@ import { WebSocket } from 'ws';
 import 'lean-test';
 
 import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverRunner';
-import { makeBreakableTcpProxy } from '../test-helpers/breakableTcpProxy';
+import { BreakableTcpProxy } from '../test-helpers/BreakableTcpProxy';
 import {
   Broadcaster,
   websocketHandler,
@@ -29,7 +29,7 @@ interface Context {
     changeHandler?: (state: TestT) => void,
     reconnectionStrategy?: ReconnectionStrategy<TestT, Spec<TestT>>,
   ): SharedReducer<TestT, Spec<TestT>>;
-  setNetworkAvailable(up: boolean): void;
+  proxy: BreakableTcpProxy;
 }
 
 describe('e2e', () => {
@@ -56,7 +56,8 @@ describe('e2e', () => {
 
     model.set('a', { foo: 'v1', bar: 10 });
     const server = await runLocalServer(app);
-    const proxy = await makeBreakableTcpProxy(server.address());
+    const proxy = new BreakableTcpProxy(server.address());
+    await proxy.listen(0, 'localhost');
     const host = getAddress(proxy.server, 'ws');
     const reducers: SharedReducer<any, any>[] = [];
 
@@ -88,7 +89,7 @@ describe('e2e', () => {
         reducers.push(r);
         return r;
       },
-      setNetworkAvailable: proxy.setConnected,
+      proxy,
     });
 
     return async () => {
@@ -242,7 +243,7 @@ describe('e2e', () => {
     });
 
     it('reconnects and resends changes if the connection is lost', async ({ getTyped }) => {
-      const { getReducer, broadcaster, peekState, setNetworkAvailable } = getTyped(CONTEXT);
+      const { getReducer, broadcaster, peekState, proxy } = getTyped(CONTEXT);
 
       const specs: ChangeInfo<Spec<TestT>>[] = [];
       const s = await broadcaster.subscribe('a');
@@ -257,7 +258,7 @@ describe('e2e', () => {
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
 
       reducer.dispatch([{ bar: ['=', 2] }]);
-      setNetworkAvailable(false);
+      proxy.pullWire();
       reducer.dispatch([{ foo: ['=', 'while offline'] }]);
 
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -266,7 +267,7 @@ describe('e2e', () => {
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
       expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
 
-      setNetworkAvailable(true);
+      proxy.resume();
       // TODO: seems syncedState() does not actually wait for the connection to be reestablished
       await new Promise((resolve) => setTimeout(resolve, 1000));
       expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
