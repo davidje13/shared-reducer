@@ -239,7 +239,11 @@ export class SharedReducer<T, SpecT> extends EventTarget {
 
     const { state, delta } = this._dispatchLock(() =>
       reduce(this._context, old.local, specs, (syncCallback, curState) => {
-        if (curState === old.local && this._currentChange === undefined) {
+        if (
+          curState === old.local &&
+          old.local === old.server &&
+          this._currentChange === undefined
+        ) {
           syncCallback.sync(old.local);
         } else {
           this._currentSyncCallbacks.push(syncCallback);
@@ -248,6 +252,16 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     );
 
     if (state === old.local) {
+      const callbacks = this._currentSyncCallbacks;
+      if (callbacks.length > 0 && this._currentChange === undefined) {
+        this._currentSyncCallbacks = [];
+        const localChange = this._localChanges[this._localChanges.length - 1];
+        if (localChange) {
+          localChange.syncCallbacks.push(...callbacks);
+        } else {
+          callbacks.forEach((callback) => callback.sync(state));
+        }
+      }
       return old;
     }
 

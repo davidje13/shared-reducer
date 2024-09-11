@@ -14,7 +14,7 @@ import {
   ReadOnly,
   type ChangeInfo,
 } from '../backend';
-import { AT_LEAST_ONCE, SharedReducer, type ReconnectionStrategy } from '../frontend';
+import { AT_LEAST_ONCE, AT_MOST_ONCE, SharedReducer, type ReconnectionStrategy } from '../frontend';
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -94,8 +94,8 @@ describe('e2e', () => {
 
     return async () => {
       reducers.forEach((r) => r.close());
-      await proxy.close();
       await closeServer(server);
+      await proxy.close();
     };
   });
 
@@ -257,25 +257,61 @@ describe('e2e', () => {
       expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
 
-      reducer.dispatch([{ bar: ['=', 2] }]);
       proxy.pullWire();
-      reducer.dispatch([{ foo: ['=', 'while offline'] }]);
+      reducer.dispatch([{ bar: ['=', 2] }]); // will try to send before realising connection is gone
+      await sleep(10);
+      reducer.dispatch([{ foo: ['=', 'while offline'] }]); // connection already gone
 
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await sleep(30);
 
       expect(reducer.getState()).toEqual({ foo: 'while offline', bar: 2 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
       expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
 
       proxy.resume();
-      // TODO: seems syncedState() does not actually wait for the connection to be reestablished
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
 
       expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
       expect(specs).toEqual([
         { change: ['=', { foo: 'while online', bar: 1 }] },
-        { change: { bar: ['=', 2], foo: ['=', 'while offline'] } },
+        { change: { bar: ['=', 2] } },
+        { change: { foo: ['=', 'while offline'] } },
+      ]);
+
+      s.close();
+    });
+
+    it('AT_MOST_ONCE discards changes which may have already been received', async ({
+      getTyped,
+    }) => {
+      const { getReducer, broadcaster, peekState, proxy } = getTyped(CONTEXT);
+
+      const specs: ChangeInfo<Spec<TestT>>[] = [];
+      const s = await broadcaster.subscribe('a');
+      if (!s) {
+        return fail();
+      }
+      s.listen((s) => specs.push(s));
+
+      const reducer = getReducer('/a', fail, () => null, AT_MOST_ONCE);
+      reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
+      expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
+      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+
+      proxy.pullWire();
+      reducer.dispatch([{ bar: ['=', 2] }]); // will try to send before realising connection is gone
+      await sleep(10);
+      reducer.dispatch([{ foo: ['=', 'while offline'] }]); // connection already gone
+
+      await sleep(10);
+      proxy.resume();
+      expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect
+
+      expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 1 });
+      expect(specs).toEqual([
+        { change: ['=', { foo: 'while online', bar: 1 }] },
+        // bar=2 change is lost - client does not know if it was received when the wire was pulled
+        { change: { foo: ['=', 'while offline'] } },
       ]);
 
       s.close();
@@ -339,4 +375,8 @@ describe('e2e', () => {
 interface TestT {
   foo: string;
   bar: number;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

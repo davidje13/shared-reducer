@@ -10,36 +10,69 @@ export class BreakableTcpProxy {
       throw new Error('Invalid target');
     }
 
-    this.server = createServer((s) => {
+    this.server = createServer((s1) => {
       if (!this.connected) {
-        s.destroy();
+        s1.destroy();
         return;
       }
       let sConnected = true;
       const s2 = new Socket();
       s2.connect(target.port, target.address);
-      const sc: SocketCommands = {
+      const sc1: SocketCommands = {
         end: () => {
           sConnected = false;
-          s.end();
-          s2.end();
+          s1.end();
+          this.socketCommands.delete(sc1);
         },
         destroy: () => {
           sConnected = false;
-          s.destroy();
-          s2.destroy();
         },
       };
-      this.socketCommands.add(sc);
-      s.on('data', (data) => sConnected && s2.write(data, () => null));
-      s2.on('data', (data) => sConnected && s.write(data, () => null));
-      s.once('close', () => {
-        s2.end();
-        this.socketCommands.delete(sc);
+      const sc2: SocketCommands = {
+        end: () => {
+          sConnected = false;
+          s2.end();
+          this.socketCommands.delete(sc2);
+        },
+        destroy: () => {
+          sConnected = false;
+        },
+      };
+      this.socketCommands.add(sc1);
+      this.socketCommands.add(sc2);
+      s1.on('data', (data) => {
+        if (sConnected) {
+          s2.write(data);
+        } else {
+          s1.destroy();
+          this.socketCommands.delete(sc1);
+        }
+      });
+      s2.on('data', (data) => {
+        if (sConnected) {
+          s1.write(data);
+        } else {
+          s2.destroy();
+          this.socketCommands.delete(sc2);
+        }
+      });
+      s1.once('close', () => {
+        if (sConnected) {
+          s2.end();
+          this.socketCommands.delete(sc2);
+        } else {
+          s1.destroy();
+          this.socketCommands.delete(sc1);
+        }
       });
       s2.once('close', () => {
-        s.end();
-        this.socketCommands.delete(sc);
+        if (sConnected) {
+          s1.end();
+          this.socketCommands.delete(sc1);
+        } else {
+          s2.destroy();
+          this.socketCommands.delete(sc2);
+        }
       });
     });
   }
