@@ -1,55 +1,49 @@
 import type { MaybePromise } from './helpers/MaybePromise';
-
-const PING = 'P';
-const PONG = 'p';
-const PING_INTERVAL = 20 * 1000;
-
-const exponentialReconnectDelay =
-  (base: number, initialDelay: number, maxDelay: number, randomness: number) =>
-  (attempt: number) => {
-    return (
-      Math.min(Math.pow(base, attempt) * initialDelay, maxDelay) * (1 - Math.random() * randomness)
-    );
-  };
-
-interface DisconnectDetail {
-  code: number;
-  reason: string;
-}
+import { ReconnectScheduler } from './reconnection/ReconnectScheduler';
 
 export class ReconnectingWebSocket extends EventTarget {
   private _ws: WebSocket | null = null;
   private _closed = false;
-  private _connecting = false;
-  private _reconnectTimeout: NodeJS.Timeout | null = null;
-  private _connectionAttempts = 0;
+  private readonly _reconnectScheduler: Scheduler;
 
   public constructor(
     private readonly _connectionGetter: () => MaybePromise<{ url: string; token?: string }>,
-    private readonly _reconnectDelay = exponentialReconnectDelay(2, 200, 600_000, 0.3),
+    reconnectSchedulerFactory = (fn: (signal: AbortSignal) => MaybePromise<void>): Scheduler =>
+      new ReconnectScheduler(fn, 20_000),
   ) {
     super();
-    this._reconnect();
+    this._reconnectScheduler = reconnectSchedulerFactory(this._reconnect.bind(this));
+    this._reconnectScheduler.trigger();
   }
 
-  private readonly _reconnect = async () => {
-    this._cancelReconnect();
-    if (this._ws || this._connecting || this._closed) {
-      return;
-    }
-    this._connecting = true;
-    const ac = new AbortController();
-    try {
-      const { url, token } = await this._connectionGetter();
-      const ws = new WebSocket(url);
-      if (token) {
-        ws.addEventListener('open', () => ws.send(token), { once: true, signal: ac.signal });
-      }
+  private async _reconnect(s: AbortSignal) {
+    const { url, token } = await this._connectionGetter();
+    s.throwIfAborted();
 
-      const handshakeTimeout = setTimeout(
-        () => handleClose({ code: 0, reason: 'handshake timeout' }),
-        20000,
-      );
+    const connectionAC = new AbortController();
+    const connectionSignal = connectionAC.signal;
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(url);
+
+      let connecting = true;
+      const handleClose = (detail: DisconnectDetail) => {
+        connectionAC.abort();
+        ws.close();
+        if (connecting) {
+          connecting = false;
+          reject(new Error(`handshake failed: ${detail.code} ${detail.reason}`));
+        } else {
+          this._ws = null;
+          this.dispatchEvent(new CustomEvent('disconnected', { detail }));
+          if (!this._closed) {
+            this._reconnectScheduler.schedule();
+          }
+        }
+      };
+
+      if (token) {
+        ws.addEventListener('open', () => ws.send(token), { once: true, signal: connectionSignal });
+      }
 
       ws.addEventListener(
         'message',
@@ -57,66 +51,26 @@ export class ReconnectingWebSocket extends EventTarget {
           if (e.data === PONG) {
             return;
           }
-          if (this._connecting) {
-            clearTimeout(handshakeTimeout);
+          if (connecting) {
+            connecting = false;
             this._ws = ws;
-            this._connecting = false;
-            this._connectionAttempts = 0;
             this.dispatchEvent(new CustomEvent('connected'));
+            resolve();
           }
           this.dispatchEvent(new CustomEvent('message', { detail: e.data }));
         },
-        { signal: ac.signal },
+        { signal: connectionSignal },
       );
 
-      const handleClose = (detail: DisconnectDetail) => {
-        ac.abort();
-        clearTimeout(handshakeTimeout);
-        this._connecting = false;
-        if (this._ws) {
-          this._ws = null;
-          this.dispatchEvent(new CustomEvent('disconnected', { detail }));
-        }
-        this._scheduleReconnect();
-      };
-
-      ws.addEventListener('close', (e) => handleClose({ code: e.code, reason: e.reason }), {
-        signal: ac.signal,
-      });
-
-      ws.addEventListener('error', () => handleClose({ code: 0, reason: 'client side error' }), {
-        signal: ac.signal,
-      });
+      ws.addEventListener('close', handleClose, { signal: connectionSignal });
+      ws.addEventListener('error', () => handleClose(ERROR_DETAIL), { signal: connectionSignal });
+      s.addEventListener('abort', () => handleClose(ABORT_DETAIL), { signal: connectionSignal });
 
       schedulePings(ws);
-    } catch (e) {
-      ac.abort();
-      this._ws = null;
-      this._connecting = false;
-      this._scheduleReconnect();
-    }
-  };
-
-  private _scheduleReconnect() {
-    if (this._ws || this._connecting || this._closed || this._reconnectTimeout !== null) {
-      return;
-    }
-    const delay = this._reconnectDelay(this._connectionAttempts);
-    this._reconnectTimeout = setTimeout(this._reconnect, delay);
-    global.addEventListener?.('online', this._reconnect);
-    global.addEventListener?.('pageshow', this._reconnect);
-    global.addEventListener?.('focus', this._reconnect);
-    ++this._connectionAttempts;
-  }
-
-  private _cancelReconnect() {
-    if (this._reconnectTimeout !== null) {
-      clearTimeout(this._reconnectTimeout);
-      global.removeEventListener?.('online', this._reconnect);
-      global.removeEventListener?.('pageshow', this._reconnect);
-      global.removeEventListener?.('focus', this._reconnect);
-      this._reconnectTimeout = null;
-    }
+    }).catch((e) => {
+      connectionAC.abort();
+      throw e;
+    });
   }
 
   public isConnected() {
@@ -132,7 +86,7 @@ export class ReconnectingWebSocket extends EventTarget {
 
   public close() {
     this._closed = true;
-    this._cancelReconnect();
+    this._reconnectScheduler.stop();
     this._ws?.close();
   }
 }
@@ -168,3 +122,21 @@ function schedulePings(ws: WebSocket) {
   ws.addEventListener('error', stop, { signal: ac.signal });
   global.addEventListener?.('offline', ping, { signal: ac.signal });
 }
+
+interface DisconnectDetail {
+  code: number;
+  reason: string;
+}
+
+interface Scheduler {
+  trigger(): void;
+  schedule(): void;
+  stop(): void;
+}
+
+const ERROR_DETAIL: DisconnectDetail = { code: 0, reason: 'client side error' };
+const ABORT_DETAIL: DisconnectDetail = { code: 0, reason: 'handshake timeout' };
+
+const PING = 'P';
+const PONG = 'p';
+const PING_INTERVAL = 20 * 1000;
