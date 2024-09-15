@@ -14,7 +14,7 @@ import {
   ReadOnly,
   type ChangeInfo,
 } from '../backend';
-import { AT_LEAST_ONCE, AT_MOST_ONCE, SharedReducer, type ReconnectionStrategy } from '../frontend';
+import { AT_LEAST_ONCE, AT_MOST_ONCE, SharedReducer, type SharedReducerOptions } from '../frontend';
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -27,7 +27,7 @@ interface Context {
     path: string,
     warningHandler: (warning: string) => void,
     changeHandler?: (state: TestT) => void,
-    reconnectionStrategy?: ReconnectionStrategy<TestT, Spec<TestT>>,
+    options?: SharedReducerOptions<TestT, Spec<TestT>>,
   ): SharedReducer<TestT, Spec<TestT>>;
   proxy: BreakableTcpProxy;
 }
@@ -74,11 +74,11 @@ describe('e2e', () => {
           await s.close();
         }
       },
-      getReducer: (path, warningHandler, changeHandler, reconnectionStrategy) => {
+      getReducer: (path, warningHandler, changeHandler, options) => {
         const r = new SharedReducer<TestT, Spec<TestT>>(
           context,
           () => ({ url: host + path }),
-          reconnectionStrategy,
+          options,
         );
         r.addEventListener('warning', (e) =>
           warningHandler(((e as CustomEvent).detail as Error).message),
@@ -252,7 +252,7 @@ describe('e2e', () => {
       }
       s.listen((s) => specs.push(s));
 
-      const reducer = getReducer('/a', fail, () => null, AT_LEAST_ONCE);
+      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_LEAST_ONCE });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
@@ -293,7 +293,7 @@ describe('e2e', () => {
       }
       s.listen((s) => specs.push(s));
 
-      const reducer = getReducer('/a', fail, () => null, AT_MOST_ONCE);
+      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_MOST_ONCE });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });

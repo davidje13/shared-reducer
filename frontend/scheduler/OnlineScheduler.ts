@@ -1,50 +1,59 @@
 import type { MaybePromise } from '../helpers/MaybePromise';
+import type { Scheduler } from './Scheduler';
 
-export class ReconnectScheduler {
+type Handler = (signal: AbortSignal) => MaybePromise<void>;
+type DelayGetter = (attempt: number) => number;
+
+export class OnlineScheduler implements Scheduler {
   private _timeout: NodeJS.Timeout | null = null;
   private _stop: (() => void) | null = null;
-  private _running = false;
+  private _handler: Handler | null = null;
   private _attempts = 0;
 
   public constructor(
-    private readonly _handler: (signal: AbortSignal) => MaybePromise<void>,
+    private readonly _delayGetter: DelayGetter,
     private readonly _connectTimeLimit: number,
-    private readonly _reconnectDelay = exponentialDelay(2, 200, 600_000, 0.3),
   ) {
     this._attempt = this._attempt.bind(this);
   }
 
-  public async trigger() {
+  public trigger(handler: Handler) {
     this.stop();
-    this._running = true;
+    this._handler = handler;
     this._attempt();
   }
 
-  schedule() {
-    if (this._timeout !== null || this._stop !== null) {
+  public schedule(handler: Handler) {
+    if (this._handler === handler) {
       return;
     }
-    this._running = true;
+    if (this._stop) {
+      this.stop();
+    }
+    this._handler = handler;
+    if (this._timeout !== null) {
+      return;
+    }
     if (global.document?.visibilityState === 'hidden') {
       global.addEventListener?.('visibilitychange', this._attempt);
     } else {
       global.addEventListener?.('online', this._attempt);
-      this._timeout = setTimeout(this._attempt, this._reconnectDelay(this._attempts));
+      this._timeout = setTimeout(this._attempt, this._delayGetter(this._attempts));
     }
     global.addEventListener?.('pageshow', this._attempt);
     global.addEventListener?.('focus', this._attempt);
     ++this._attempts;
   }
 
-  stop() {
-    this._running = false;
+  public stop() {
+    this._handler = null;
     this._stop?.();
     this._stop = null;
     this._remove();
   }
 
   private async _attempt() {
-    if (this._stop) {
+    if (this._stop || !this._handler) {
       return;
     }
     this._remove();
@@ -62,12 +71,15 @@ export class ReconnectScheduler {
           stopTimeout = () => clearTimeout(connectTimeout);
         }),
       ]);
+      this._handler = null;
       this._attempts = 0;
     } catch (_ignore) {
       if (!ac.signal.aborted) {
         ac.abort();
-        if (this._running) {
-          this.schedule();
+        const h = this._handler;
+        if (h) {
+          this._handler = null;
+          this.schedule(h);
         }
       }
     } finally {
@@ -89,6 +101,14 @@ export class ReconnectScheduler {
   }
 }
 
-const exponentialDelay =
-  (base: number, initialDelay: number, maxDelay: number, randomness: number) => (attempt: number) =>
+interface ExponentialDelayConfig {
+  base?: number;
+  initialDelay: number;
+  maxDelay: number;
+  randomness?: number;
+}
+
+export const exponentialDelay =
+  ({ base = 2, initialDelay, maxDelay, randomness = 0 }: ExponentialDelayConfig): DelayGetter =>
+  (attempt) =>
     Math.min(Math.pow(base, attempt) * initialDelay, maxDelay) * (1 - Math.random() * randomness);

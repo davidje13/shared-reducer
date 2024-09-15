@@ -1,23 +1,21 @@
-import type { MaybePromise } from './helpers/MaybePromise';
-import { ReconnectScheduler } from './reconnection/ReconnectScheduler';
+import type { MaybePromise } from '../helpers/MaybePromise';
+import type { Scheduler } from '../scheduler/Scheduler';
 
 export class ReconnectingWebSocket extends EventTarget {
   private _ws: WebSocket | null = null;
   private _closed = false;
-  private readonly _reconnectScheduler: Scheduler;
 
   public constructor(
-    private readonly _connectionGetter: () => MaybePromise<{ url: string; token?: string }>,
-    reconnectSchedulerFactory = (fn: (signal: AbortSignal) => MaybePromise<void>): Scheduler =>
-      new ReconnectScheduler(fn, 20_000),
+    private readonly _connectionGetter: ConnectionGetter,
+    private readonly _reconnectScheduler: Scheduler,
   ) {
     super();
-    this._reconnectScheduler = reconnectSchedulerFactory(this._reconnect.bind(this));
-    this._reconnectScheduler.trigger();
+    this._reconnect = this._reconnect.bind(this);
+    this._reconnectScheduler.trigger(this._reconnect);
   }
 
   private async _reconnect(s: AbortSignal) {
-    const { url, token } = await this._connectionGetter();
+    const { url, token } = await this._connectionGetter(s);
     s.throwIfAborted();
 
     const connectionAC = new AbortController();
@@ -36,7 +34,7 @@ export class ReconnectingWebSocket extends EventTarget {
           this._ws = null;
           this.dispatchEvent(new CustomEvent('disconnected', { detail }));
           if (!this._closed) {
-            this._reconnectScheduler.schedule();
+            this._reconnectScheduler.schedule(this._reconnect);
           }
         }
       };
@@ -123,15 +121,16 @@ function schedulePings(ws: WebSocket) {
   global.addEventListener?.('offline', ping, { signal: ac.signal });
 }
 
-interface DisconnectDetail {
-  code: number;
-  reason: string;
+export interface ConnectionInfo {
+  url: string;
+  token?: string;
 }
 
-interface Scheduler {
-  trigger(): void;
-  schedule(): void;
-  stop(): void;
+export type ConnectionGetter = (signal: AbortSignal) => MaybePromise<ConnectionInfo>;
+
+export interface DisconnectDetail {
+  code: number;
+  reason: string;
 }
 
 const ERROR_DETAIL: DisconnectDetail = { code: 0, reason: 'client side error' };

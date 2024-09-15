@@ -3,9 +3,10 @@ import { reduce } from './reduce';
 import { actionsSyncedCallback } from './actions/actionsSyncedCallback';
 import { idProvider } from './idProvider';
 import { lock } from './lock';
-import { ReconnectingWebSocket } from './ReconnectingWebSocket';
-import type { MaybePromise } from './helpers/MaybePromise';
-import { AT_LEAST_ONCE, type ReconnectionStrategy } from './reconnection/strategies';
+import { ReconnectingWebSocket, type ConnectionGetter } from './reconnection/ReconnectingWebSocket';
+import { AT_LEAST_ONCE, type DeliveryStrategy } from './reconnection/deliveryStrategies';
+import { exponentialDelay, OnlineScheduler } from './scheduler/OnlineScheduler';
+import type { Scheduler } from './scheduler/Scheduler';
 
 interface InitEvent<T> {
   init: T;
@@ -41,32 +42,34 @@ interface State<T> {
   readonly local: T;
 }
 
+export interface SharedReducerOptions<T, SpecT> {
+  scheduler?: Scheduler | undefined;
+  deliveryStrategy?: DeliveryStrategy<T, SpecT> | undefined;
+}
+
 export class SharedReducer<T, SpecT> extends EventTarget {
   private readonly _ws: ReconnectingWebSocket;
-
   private _latestStates: State<T> | null = null;
-
   private _currentChange: SpecT | undefined;
-
   private _currentSyncCallbacks: SyncCallback<T>[] = [];
-
   private _localChanges: LocalChange<T, SpecT>[] = [];
-
   private _pendingChanges: SpecSource<T, SpecT>[] = [];
-
+  private readonly _deliveryStrategy: DeliveryStrategy<T, SpecT>;
   private readonly _listeners: Set<(state: T) => void> = new Set();
-
   private readonly _dispatchLock = lock('Cannot dispatch recursively');
-
   private readonly _nextId = idProvider();
 
   public constructor(
     private readonly _context: Context<T, SpecT>,
-    connectionGetter: () => MaybePromise<{ url: string; token?: string }>,
-    private readonly _reconnectionStrategy: ReconnectionStrategy<T, SpecT> = AT_LEAST_ONCE,
+    connectionGetter: ConnectionGetter,
+    {
+      scheduler = new OnlineScheduler(DEFAULT_RECONNECT, 20 * 1000),
+      deliveryStrategy = AT_LEAST_ONCE,
+    }: SharedReducerOptions<T, SpecT> = {},
   ) {
     super();
-    this._ws = new ReconnectingWebSocket(connectionGetter);
+    this._deliveryStrategy = deliveryStrategy;
+    this._ws = new ReconnectingWebSocket(connectionGetter, scheduler);
     this._ws.addEventListener('message', this._handleMessage);
     this._ws.addEventListener('connected', this._forwardEvent);
     this._ws.addEventListener('disconnected', this._forwardEvent);
@@ -91,7 +94,7 @@ export class SharedReducer<T, SpecT> extends EventTarget {
 
   private _handleInitMessage(message: InitEvent<T>) {
     this._localChanges = this._localChanges.filter((c) => {
-      if (this._reconnectionStrategy(message.init, c.change, c.sent)) {
+      if (this._deliveryStrategy(message.init, c.change, c.sent)) {
         return true;
       }
       c.syncCallbacks.forEach((fn) => fn.reject('message possibly lost'));
@@ -311,3 +314,10 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     this._ws.removeEventListener('disconnected', this._forwardEvent);
   }
 }
+
+const DEFAULT_RECONNECT = exponentialDelay({
+  base: 2,
+  initialDelay: 200,
+  maxDelay: 10 * 60 * 1000,
+  randomness: 0.3,
+});

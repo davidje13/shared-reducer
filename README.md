@@ -356,6 +356,82 @@ new Broadcaster(model, reducer[, options]);
   an incrementing number, which should be sufficient for
   most use cases.
 
+## Other customisations (Frontend)
+
+If the connection is lost, the frontend will attempt to reconnect
+automatically. By default this uses an exponential backoff with a
+small amount of randomness, as well as attempting to connect if the
+page regains focus or the computer rejoins a network. You can fully
+customise this behaviour:
+
+```javascript
+import { SharedReducer, OnlineScheduler, exponentialDelay } from 'shared-reducer/frontend';
+
+const reducer = new SharedReducer(
+  context,
+  () => ({ url: 'ws://destination' }),
+  {
+    scheduler: new OnlineScheduler(
+      exponentialDelay({
+        base: 2,
+        initialDelay: 200,
+        maxDelay: 10 * 60 * 1000,
+        randomness: 0.3,
+      }),
+      20 * 1000, // timeout for each connection attempt
+    ),
+  },
+);
+```
+
+The `exponentialDelay` helper returns:
+
+```
+min(initialDelay * (base ^ attempt), maxDelay) * (1 - random(randomness))
+```
+
+All delay values are in milliseconds.
+
+You can also provide a custom function instead of `exponentialDelay`;
+it will be given the current attempt number (0-based), and should
+return the number of milliseconds to wait before triggering the
+attempt.
+
+Finally, by default when reconnecting `SharedReducer` will replay all
+messages which have not been confirmed (`AT_LEAST_ONCE` delivery).
+You can change this to `AT_MOST_ONCE` or a custom mechanism:
+
+```javascript
+import { SharedReducer, AT_MOST_ONCE } from 'shared-reducer/frontend';
+
+const reducer = new SharedReducer(
+  context,
+  () => ({ url: 'ws://destination' }),
+  {
+    deliveryStrategy: AT_MOST_ONCE,
+  },
+);
+```
+
+Custom strategies can be defined as functions:
+
+```javascript
+function myCustomDeliveryStrategy(serverState, spec, hasSent) {
+  return true; // re-send all (equivalent to AT_LEAST_ONCE)
+}
+```
+
+- `serverState` is the new state from the server after reconnecting.
+- `spec` is a spec that has not been confirmed as delivered to the
+  server.
+- `hasSent` is `true` if the spec has already been sent to the server
+  (but no delivery confirmation was received). It is `false` if the
+  message was never sent to the server.
+
+Note that the function will be invoked multiple times (once for each
+change that is pending). It should return `true` for messages to
+resend, and `false` for messages to drop.
+
 ## Older versions
 
 For older versions of this library, see the separate
