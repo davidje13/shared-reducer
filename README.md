@@ -24,7 +24,7 @@ but can also be used in isolation.
 ```js
 import {
   Broadcaster,
-  websocketHandler,
+  WebsocketHandlerFactory,
   InMemoryModel,
   ReadWrite,
 } from 'shared-reducer/backend';
@@ -38,8 +38,14 @@ model.set('a', { foo: 'v1' });
 const app = new WebSocketExpress();
 const server = app.listen(0, 'localhost');
 
-const handler = websocketHandler(broadcaster);
-app.ws('/:id', handler((req) => req.params.id, () => ReadWrite));
+const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+app.ws('/:id', handlerFactory.handler((req) => req.params.id, () => ReadWrite));
+
+const server = app.listen();
+
+// later, to shutdown gracefully:
+await handlerFactory.close(1000); // send a close signal to all clients and wait up to 1 second for acknowledgement
+server.close();
 ```
 
 For real use-cases, you will probably want to add authentication middleware
@@ -184,6 +190,11 @@ performed on the client. The ID is an opaque identifier which is reflected
 back to the same client in the confirmation message. Other clients will not
 receive the ID.
 
+`x` (close ack):
+Sent by the client in response to `X` (closing). Indicates that the
+client will not send any more messages on this connection (but may
+still be expecting some responses to existing messages).
+
 ### Server-to-client
 
 `p` (pong):
@@ -208,6 +219,13 @@ Sent if the server rejects a client-initiated change.
 
 If this is returned, the server state will not have changed (i.e. the
 entire spec failed).
+
+`X` (closing):
+Sent when the server is about to shut down. The client should respond
+with `x` and not send any more messages on the current connection.
+Any currently in-flight messages will be acknowledged on a best-effort
+basis by the server. The server might not wait for the acknowledging
+`x` message before closing the connection.
 
 ### Specs
 

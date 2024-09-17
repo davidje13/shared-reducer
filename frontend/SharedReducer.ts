@@ -49,6 +49,7 @@ export interface SharedReducerOptions<T, SpecT> {
 
 export class SharedReducer<T, SpecT> extends EventTarget {
   private readonly _ws: ReconnectingWebSocket;
+  private _paused = true;
   private _latestStates: State<T> | null = null;
   private _currentChange: SpecT | undefined;
   private _currentSyncCallbacks: SyncCallback<T>[] = [];
@@ -76,7 +77,13 @@ export class SharedReducer<T, SpecT> extends EventTarget {
   }
 
   private readonly _handleMessage = (e: Event) => {
-    const message = JSON.parse((e as CustomEvent).detail) as ServerEvent<T, SpecT>;
+    const raw = (e as CustomEvent).detail;
+    if (raw === 'X') {
+      this._paused = true;
+      this._ws.send('x');
+      return;
+    }
+    const message = JSON.parse(raw) as ServerEvent<T, SpecT>;
     if ('change' in message) {
       this._handleChangeMessage(message);
     } else if ('init' in message) {
@@ -104,6 +111,7 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     this._pendingChanges.length = 0;
     this._sendState(this._latestStates.local);
 
+    this._paused = false;
     if (this._ws.isConnected()) {
       for (const { change, id } of this._localChanges) {
         this._ws.send(JSON.stringify({ change, id }));
@@ -218,7 +226,7 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     this._currentSyncCallbacks = [];
 
     const localChange: LocalChange<T, SpecT> = { change, id, syncCallbacks, sent: false };
-    if (this._ws.isConnected()) {
+    if (this._ws.isConnected() && !this._paused) {
       localChange.sent = true;
       this._ws.send(JSON.stringify({ change, id }));
     }

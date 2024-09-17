@@ -8,7 +8,7 @@ import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverR
 import { BreakableTcpProxy } from '../test-helpers/BreakableTcpProxy';
 import {
   Broadcaster,
-  websocketHandler,
+  WebsocketHandlerFactory,
   InMemoryModel,
   ReadWrite,
   ReadOnly,
@@ -38,17 +38,17 @@ describe('e2e', () => {
     const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
 
     const app = new WebSocketExpress();
-    const handler = websocketHandler(broadcaster);
+    const handlerFactory = new WebsocketHandlerFactory(broadcaster);
     app.ws(
       '/:id/read',
-      handler(
+      handlerFactory.handler(
         (req: Request) => req.params['id'] ?? '',
         () => ReadOnly,
       ),
     );
     app.ws(
       '/:id',
-      handler(
+      handlerFactory.handler(
         (req: Request) => req.params['id'] ?? '',
         () => ReadWrite,
       ),

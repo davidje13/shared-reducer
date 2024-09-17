@@ -5,7 +5,13 @@ import {
   type ChangeInfo,
   type TopicMessage,
 } from './Broadcaster';
-import { websocketHandler, PING, PONG } from './handlers/websocketHandler';
+import {
+  WebsocketHandlerFactory,
+  PING,
+  PONG,
+  CLOSE,
+  CLOSE_ACK,
+} from './handlers/WebsocketHandlerFactory';
 import { UniqueIdProvider } from './helpers/UniqueIdProvider';
 import { CollectionStorageModel } from './model/CollectionStorageModel';
 import { type Permission, PermissionError } from './permission/Permission';
@@ -35,9 +41,11 @@ export {
   type Topic,
   type TopicMap,
   Broadcaster,
-  websocketHandler,
+  WebsocketHandlerFactory,
   PING,
   PONG,
+  CLOSE,
+  CLOSE_ACK,
   InMemoryModel,
   CollectionStorageModel,
   PermissionError,

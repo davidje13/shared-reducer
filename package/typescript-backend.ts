@@ -1,4 +1,9 @@
-import { Broadcaster, websocketHandler, ReadWrite, InMemoryModel } from 'shared-reducer/backend';
+import {
+  Broadcaster,
+  WebsocketHandlerFactory,
+  ReadWrite,
+  InMemoryModel,
+} from 'shared-reducer/backend';
 import context, { type Spec } from 'json-immutability-helper';
 import { Request } from 'express';
 import { WebSocketExpress } from 'websocket-express';
@@ -19,10 +24,10 @@ interface Type {
 
   const app = new WebSocketExpress();
 
-  const handler = websocketHandler(broadcaster);
+  const handlerFactory = new WebsocketHandlerFactory(broadcaster);
   app.ws(
     '/:id',
-    handler(
+    handlerFactory.handler(
       (req: Request) => req.params.id,
       () => ReadWrite,
     ),
@@ -52,4 +57,6 @@ interface Type {
 
     await subscription.close();
   }
+
+  handlerFactory.softClose(100).then(() => null);
 })();

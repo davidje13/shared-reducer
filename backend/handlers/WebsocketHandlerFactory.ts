@@ -5,6 +5,8 @@ import type { MaybePromise } from '../helpers/MaybePromise';
 
 export const PING = 'P';
 export const PONG = 'p';
+export const CLOSE = 'X';
+export const CLOSE_ACK = 'x';
 
 interface ServerWebSocket {
   on(event: 'close', listener: () => void): void;
@@ -19,16 +21,32 @@ interface WSResponse {
   endTransaction(): void;
 }
 
-export const websocketHandler =
-  <T, SpecT>(broadcaster: Broadcaster<T, SpecT>) =>
-  <Req, Res extends WSResponse>(
+export class WebsocketHandlerFactory<T, SpecT> {
+  private readonly closers = new Set<() => Promise<void>>();
+
+  constructor(private readonly broadcaster: Broadcaster<T, SpecT>) {}
+
+  public async softClose(timeout: number) {
+    let tm: NodeJS.Timeout | null = null;
+    await Promise.race([
+      Promise.all([...this.closers].map((c) => c())),
+      new Promise((resolve) => {
+        tm = setTimeout(resolve, timeout);
+      }),
+    ]);
+    if (tm !== null) {
+      clearTimeout(tm);
+    }
+  }
+
+  public handler<Req, Res extends WSResponse>(
     idGetter: (req: Req, res: Res) => MaybePromise<string>,
     permissionGetter: (req: Req, res: Res) => MaybePromise<Permission<T, SpecT>>,
-  ) => {
+  ) {
     const handshake = async (req: Req, res: Res) => {
       const id = await idGetter(req, res);
       const permission = await permissionGetter(req, res);
-      const subscription = await broadcaster.subscribe<number>(id, permission);
+      const subscription = await this.broadcaster.subscribe<number>(id, permission);
       if (!subscription) {
         res.sendError(404);
         return null;
@@ -48,8 +66,24 @@ export const websocketHandler =
 
       try {
         const ws = await res.accept();
+        let state = 0;
 
-        ws.on('close', () => subscription.close().catch(() => null));
+        let closed: () => void = () => null;
+        const handleSoftClose = () => {
+          this.closers.delete(handleSoftClose);
+          ws.send(CLOSE);
+          state = 1;
+          return new Promise<void>((resolve) => {
+            closed = resolve;
+          });
+        };
+
+        ws.on('close', () => {
+          state = 2;
+          subscription.close().catch(() => null);
+          this.closers.delete(handleSoftClose);
+          closed();
+        });
 
         ws.on('message', async (data, isBinary) => {
           try {
@@ -61,6 +95,17 @@ export const websocketHandler =
             if (msg === PING) {
               ws.send(PONG);
               return;
+            }
+            if (msg === CLOSE_ACK) {
+              if (state !== 1) {
+                throw new Error('Unexpected close ack message');
+              }
+              state = 2;
+              closed();
+              return;
+            }
+            if (state === 2) {
+              throw new Error('Unexpected message after close ack');
             }
 
             const request = unpackMessage(msg);
@@ -85,10 +130,12 @@ export const websocketHandler =
           const data = id !== undefined ? { id, ...msg } : msg;
           ws.send(JSON.stringify(data));
         });
+        this.closers.add(handleSoftClose);
       } catch (e) {
         console.warn('WebSocket error', e);
         res.sendError(500);
         subscription.close().catch(() => null);
       }
     };
-  };
+  }
+}
