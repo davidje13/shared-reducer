@@ -1,64 +1,42 @@
-import type { Context, Dispatch, SpecSource, SyncCallback } from './DispatchSpec';
+import type { Context, Dispatch, DispatchSpec, SpecSource } from './DispatchSpec';
 import { reduce } from './reduce';
-import { actionsSyncedCallback } from './actions/actionsSyncedCallback';
-import { idProvider } from './idProvider';
-import { lock } from './lock';
-import { ReconnectingWebSocket, type ConnectionGetter } from './reconnection/ReconnectingWebSocket';
-import { AT_LEAST_ONCE, type DeliveryStrategy } from './reconnection/deliveryStrategies';
+import { lock } from './helpers/lock';
+import {
+  ReconnectingWebSocket,
+  type ConnectionGetter,
+  type DisconnectDetail,
+} from './connection/ReconnectingWebSocket';
+import { AT_LEAST_ONCE, type DeliveryStrategy } from './connection/deliveryStrategies';
 import { exponentialDelay, OnlineScheduler } from './scheduler/OnlineScheduler';
 import type { Scheduler } from './scheduler/Scheduler';
-
-interface InitEvent<T> {
-  init: T;
-  id?: undefined;
-}
-
-interface ChangeEvent<SpecT> {
-  change: SpecT;
-  id?: number;
-}
-
-interface ApiError {
-  error: string;
-  id?: number;
-}
-
-type ServerEvent<T, SpecT> = InitEvent<T> | ChangeEvent<SpecT> | ApiError;
-
-interface LocalChange<T, SpecT> {
-  change: SpecT;
-  id: number;
-  syncCallbacks: SyncCallback<T>[];
-  sent: boolean;
-}
-
-interface LocalChangeIndex<T, SpecT> {
-  localChange: LocalChange<T, SpecT> | null;
-  index: number;
-}
-
-interface State<T> {
-  readonly server: T;
-  readonly local: T;
-}
+import type {
+  ChangeMessage,
+  ErrorMessage,
+  InitMessage,
+  ServerMessage,
+} from './connection/messages';
+import { LocalChangeTracker } from './connection/LocalChangeTracker';
+import { debounce } from './helpers/debounce';
+import { makeEvent, TypedEventTarget } from './helpers/TypedEventTarget';
 
 export interface SharedReducerOptions<T, SpecT> {
   scheduler?: Scheduler | undefined;
   deliveryStrategy?: DeliveryStrategy<T, SpecT> | undefined;
 }
 
-export class SharedReducer<T, SpecT> extends EventTarget {
+type SharedReducerEvents = {
+  connected: CustomEvent<void>;
+  disconnected: CustomEvent<DisconnectDetail>;
+  warning: CustomEvent<Error>;
+};
+
+export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvents> {
   private readonly _ws: ReconnectingWebSocket;
   private _paused = true;
-  private _latestStates: State<T> | null = null;
-  private _currentChange: SpecT | undefined;
-  private _currentSyncCallbacks: SyncCallback<T>[] = [];
-  private _localChanges: LocalChange<T, SpecT>[] = [];
-  private _pendingChanges: SpecSource<T, SpecT>[] = [];
-  private readonly _deliveryStrategy: DeliveryStrategy<T, SpecT>;
+  private _state: State<T, SpecT> = { _stage: 0, _queue: [] };
+  private readonly _tracker: LocalChangeTracker<T, SpecT>;
   private readonly _listeners: Set<(state: T) => void> = new Set();
   private readonly _dispatchLock = lock('Cannot dispatch recursively');
-  private readonly _nextId = idProvider();
 
   public constructor(
     private readonly _context: Context<T, SpecT>,
@@ -69,21 +47,120 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     }: SharedReducerOptions<T, SpecT> = {},
   ) {
     super();
-    this._deliveryStrategy = deliveryStrategy;
+    this._tracker = new LocalChangeTracker<T, SpecT>(_context, deliveryStrategy);
     this._ws = new ReconnectingWebSocket(connectionGetter, scheduler);
     this._ws.addEventListener('message', this._handleMessage);
-    this._ws.addEventListener('connected', this._forwardEvent);
-    this._ws.addEventListener('disconnected', this._forwardEvent);
+    this._ws.addEventListener('connected', this._handleConnected);
+    this._ws.addEventListener('disconnected', this._handleDisconnected);
   }
 
-  private readonly _handleMessage = (e: Event) => {
-    const raw = (e as CustomEvent).detail;
-    if (raw === 'X') {
-      this._paused = true;
-      this._ws.send('x');
+  public readonly dispatch = makeDispatch<T, SpecT>((specs, resolve, reject) => {
+    if (!specs.length && !resolve && !reject) {
       return;
     }
-    const message = JSON.parse(raw) as ServerEvent<T, SpecT>;
+
+    const item: DispatchArgs<T, SpecT> = { _specs: specs, _resolve: resolve, _reject: reject };
+    switch (this._state._stage) {
+      case -1:
+        throw new Error('closed');
+      case 0:
+        this._state._queue.push(item);
+        break;
+      case 1:
+        this._setLocalState(this._apply(this._state._local, [item]));
+        this._share._schedule();
+        break;
+    }
+  });
+
+  private _apply(localState: T, changes: DispatchArgs<T, SpecT>[]) {
+    return this._dispatchLock(() => {
+      for (const { _specs, _resolve, _reject } of changes) {
+        if (_specs.length) {
+          const { _state, _delta } = reduce(this._context, localState, _specs);
+          localState = _state;
+          this._tracker._add(_delta);
+        }
+        this._tracker._addCallback(localState, _resolve, _reject);
+      }
+      return localState;
+    });
+  }
+
+  private readonly _share = debounce(() => {
+    if (this._ws.isConnected() && !this._paused) {
+      this._tracker._send(this._ws.send);
+    }
+  });
+
+  private _handleInitMessage(message: InitMessage<T>) {
+    if (this._state._stage === -1) {
+      this._warn(`Ignoring init after closing: ${JSON.stringify(message)}`);
+      return;
+    }
+    this._paused = false;
+    if (this._state._stage === 0) {
+      const s = this._apply(message.init, this._state._queue);
+      this._state = { _stage: 1, _server: message.init, _local: s };
+      this._setLocalState(s, true);
+    } else {
+      this._state._server = message.init;
+      this._tracker._requeue(message.init);
+      this._setLocalState(this._tracker._computeLocal(message.init));
+    }
+    this._share._run();
+  }
+
+  private _handleChangeMessage(message: ChangeMessage<SpecT>) {
+    if (this._state._stage !== 1) {
+      this._warn(`Ignoring change before init: ${JSON.stringify(message)}`);
+      return;
+    }
+
+    const serverState = (this._state._server = this._context.update(
+      this._state._server,
+      message.change,
+    ));
+
+    const { _localChange, _isFirst } = this._tracker._popChange(message.id);
+    if (!_isFirst) {
+      this._setLocalState(this._tracker._computeLocal(serverState));
+    }
+    _localChange?._resolve.forEach((f) => f(serverState));
+  }
+
+  private _handleErrorMessage(message: ErrorMessage) {
+    if (this._state._stage !== 1) {
+      this._warn(`Ignoring error before init: ${JSON.stringify(message)}`);
+      return;
+    }
+
+    const { _localChange } = this._tracker._popChange(message.id);
+    if (!_localChange) {
+      this._warn(`API sent error: ${message.error}`);
+      return;
+    }
+    this._warn(`API rejected update: ${message.error}`);
+    _localChange?._reject.forEach((f) => f(message.error));
+    this._setLocalState(this._tracker._computeLocal(this._state._server));
+  }
+
+  private _handleGracefulClose() {
+    this._ws.send('x');
+    if (this._paused) {
+      this._warn('Unexpected extra close message');
+      return;
+    }
+    this._paused = true;
+    this.dispatchEvent(makeEvent('disconnected', CLOSE_DETAIL));
+  }
+
+  private readonly _handleMessage = (e: CustomEvent<string>) => {
+    if (e.detail === 'X') {
+      this._handleGracefulClose();
+      return;
+    }
+    const message = JSON.parse(e.detail) as ServerMessage<T, SpecT>;
     if ('change' in message) {
       this._handleChangeMessage(message);
     } else if ('init' in message) {
@@ -91,237 +168,80 @@ export class SharedReducer<T, SpecT> extends EventTarget {
     } else if ('error' in message) {
       this._handleErrorMessage(message);
     } else {
-      this.dispatchEvent(
-        new CustomEvent('warning', {
-          detail: new Error(`Ignoring unknown API message: ${JSON.stringify(message)}`),
-        }),
-      );
+      this._warn(`Ignoring unknown API message: ${e.detail}`);
     }
   };
 
-  private _handleInitMessage(message: InitEvent<T>) {
-    this._localChanges = this._localChanges.filter((c) => {
-      if (this._deliveryStrategy(message.init, c.change, c.sent)) {
-        return true;
-      }
-      c.syncCallbacks.forEach((fn) => fn.reject('message possibly lost'));
-      return false;
-    });
-    this._latestStates = this._applySpecs(this._computeLocal(message.init), this._pendingChanges);
-    this._pendingChanges.length = 0;
-    this._sendState(this._latestStates.local);
-
-    this._paused = false;
-    if (this._ws.isConnected()) {
-      for (const { change, id } of this._localChanges) {
-        this._ws.send(JSON.stringify({ change, id }));
-      }
-    }
-  }
-
-  private _handleChangeMessage(message: ChangeEvent<SpecT>) {
-    if (!this._latestStates) {
-      this.dispatchEvent(
-        new CustomEvent('warning', {
-          detail: new Error(`Ignoring change before init: ${JSON.stringify(message)}`),
-        }),
-      );
-      return;
-    }
-
-    const { localChange, index } = this._popLocalChange(message.id);
-
-    const server = this._context.update(this._latestStates.server, message.change);
-
-    if (index === 0) {
-      // just removed the oldest pending change and applied it to
-      // the base server state: nothing has changed
-      this._latestStates = { server, local: this._latestStates.local };
-    } else {
-      this._latestStates = this._computeLocal(server);
-      this._sendState(this._latestStates.local);
-    }
-    const state = this._latestStates.local;
-    localChange?.syncCallbacks.forEach((callback) => callback.sync(state));
-  }
-
-  private _handleErrorMessage(message: ApiError) {
-    const { localChange } = this._popLocalChange(message.id);
-    if (!localChange) {
-      this.dispatchEvent(
-        new CustomEvent('warning', {
-          detail: new Error(`API sent error: ${message.error}`),
-        }),
-      );
-      return;
-    }
-    this.dispatchEvent(
-      new CustomEvent('warning', {
-        detail: new Error(`API rejected update: ${message.error}`),
-      }),
-    );
-    if (this._latestStates) {
-      this._latestStates = this._computeLocal(this._latestStates.server);
-      this._sendState(this._latestStates.local);
-    }
-    localChange.syncCallbacks.forEach((fn) => fn.reject(message.error));
-  }
-
-  public addStateListener(listener: (state: T) => void) {
+  public addStateListener(listener: (state: Readonly<T>) => void) {
     this._listeners.add(listener);
-    if (this._latestStates !== null) {
-      listener(this._latestStates.local);
+    if (this._state._stage === 1) {
+      listener(this._state._local);
     }
   }
 
-  public removeStateListener(listener: (state: T) => void) {
+  public removeStateListener(listener: (state: Readonly<T>) => void) {
     this._listeners.delete(listener);
   }
 
-  private _sendState(state: T) {
-    for (const listener of this._listeners) {
-      listener(state);
+  private _setLocalState(s: T, forceSend = false) {
+    if (this._state._stage !== 1) {
+      throw new Error('invalid state');
+    }
+    if (forceSend || this._state._local !== s) {
+      this._state._local = s;
+      for (const listener of this._listeners) {
+        listener(s);
+      }
     }
   }
 
-  public dispatch: Dispatch<T, SpecT> = (specs) => {
-    if (!specs || !specs.length) {
-      return;
-    }
+  public getState(): Readonly<T> | undefined {
+    return this._state._stage === 1 ? this._state._local : undefined;
+  }
 
-    if (this._latestStates) {
-      const updatedState = this._applySpecs(this._latestStates, specs);
-      if (updatedState !== this._latestStates) {
-        this._latestStates = updatedState;
-        this._sendState(updatedState.local);
-      }
-    } else {
-      this._pendingChanges.push(...specs);
-    }
+  private _warn(message: string) {
+    this.dispatchEvent(makeEvent('warning', new Error(message)));
+  }
+
+  private readonly _handleConnected = () => {
+    this.dispatchEvent(makeEvent('connected'));
   };
 
-  public addSyncCallback(resolve: (state: T) => void, reject?: (message: string) => void) {
-    this.dispatch([actionsSyncedCallback(resolve, reject)]);
-  }
-
-  public syncedState(): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.addSyncCallback(resolve, reject);
-    });
-  }
-
-  public getState(): T | undefined {
-    return this._latestStates?.local;
-  }
-
-  private _sendCurrentChange = () => {
-    if (this._currentChange === undefined) {
-      return;
+  private readonly _handleDisconnected = (e: CustomEvent<DisconnectDetail>) => {
+    if (!this._paused) {
+      this._paused = true;
+      this.dispatchEvent(makeEvent('disconnected', e.detail));
     }
-
-    const id = this._nextId();
-    const change = this._currentChange;
-    const syncCallbacks = this._currentSyncCallbacks;
-    this._currentChange = undefined;
-    this._currentSyncCallbacks = [];
-
-    const localChange: LocalChange<T, SpecT> = { change, id, syncCallbacks, sent: false };
-    if (this._ws.isConnected() && !this._paused) {
-      localChange.sent = true;
-      this._ws.send(JSON.stringify({ change, id }));
-    }
-    this._localChanges.push(localChange);
-  };
-
-  private _addCurrentChange(spec: SpecT) {
-    if (this._currentChange === undefined) {
-      this._currentChange = spec;
-      setTimeout(this._sendCurrentChange, 0);
-    } else {
-      this._currentChange = this._context.combine([this._currentChange, spec]);
-    }
-  }
-
-  private _applySpecs(old: State<T>, specs: SpecSource<T, SpecT>[]): State<T> {
-    if (!specs.length) {
-      // optimisation for pendingChanges
-      return old;
-    }
-
-    const { state, delta } = this._dispatchLock(() =>
-      reduce(this._context, old.local, specs, (syncCallback, curState) => {
-        if (
-          curState === old.local &&
-          old.local === old.server &&
-          this._currentChange === undefined
-        ) {
-          syncCallback.sync(old.local);
-        } else {
-          this._currentSyncCallbacks.push(syncCallback);
-        }
-      }),
-    );
-
-    if (state === old.local) {
-      const callbacks = this._currentSyncCallbacks;
-      if (callbacks.length > 0 && this._currentChange === undefined) {
-        this._currentSyncCallbacks = [];
-        const localChange = this._localChanges[this._localChanges.length - 1];
-        if (localChange) {
-          localChange.syncCallbacks.push(...callbacks);
-        } else {
-          callbacks.forEach((callback) => callback.sync(state));
-        }
-      }
-      return old;
-    }
-
-    this._addCurrentChange(delta);
-    return {
-      server: old.server,
-      local: state,
-    };
-  }
-
-  private _popLocalChange(id: number | undefined): LocalChangeIndex<T, SpecT> {
-    const index = id === undefined ? -1 : this._localChanges.findIndex((c) => c.id === id);
-    if (index === -1) {
-      return { localChange: null, index };
-    }
-    return {
-      localChange: this._localChanges.splice(index, 1)[0]!,
-      index,
-    };
-  }
-
-  private _computeLocal(server: T): State<T> {
-    let local = server;
-    if (this._localChanges.length > 0) {
-      const changes = this._context.combine(this._localChanges.map(({ change }) => change));
-      local = this._context.update(local, changes);
-    }
-    if (this._currentChange !== undefined) {
-      local = this._context.update(local, this._currentChange);
-    }
-    return { server, local };
-  }
-
-  private readonly _forwardEvent = (e: Event) => {
-    this.dispatchEvent(new CustomEvent(e.type, { detail: (e as CustomEvent).detail }));
   };
 
   public close() {
+    this._paused = true;
+    this._state = { _stage: -1 };
     this._ws.close();
-    this._latestStates = null;
-    this._currentChange = undefined;
-    this._currentSyncCallbacks = [];
-    this._localChanges = [];
-    this._pendingChanges = [];
+    this._share._stop();
+    this._listeners.clear();
     this._ws.removeEventListener('message', this._handleMessage);
-    this._ws.removeEventListener('connected', this._forwardEvent);
-    this._ws.removeEventListener('disconnected', this._forwardEvent);
+    this._ws.removeEventListener('connected', this._handleConnected);
+    this._ws.removeEventListener('disconnected', this._handleDisconnected);
   }
 }
+
+function makeDispatch<T, SpecT>(
+  handler: (
+    specs: DispatchSpec<T, SpecT>,
+    syncedCallback?: (state: T) => void,
+    errorCallback?: (error: string) => void,
+  ) => void,
+): Dispatch<T, SpecT> {
+  return Object.assign(handler, {
+    sync: (specs: DispatchSpec<T, SpecT> = []) =>
+      new Promise<T>((resolve, reject) =>
+        handler(specs, resolve, (message) => reject(new Error(message))),
+      ),
+  });
+}
+
+const CLOSE_DETAIL: DisconnectDetail = { code: 0, reason: 'graceful shutdown' };
 
 const DEFAULT_RECONNECT = exponentialDelay({
   base: 2,
@@ -329,3 +249,14 @@ const DEFAULT_RECONNECT = exponentialDelay({
   maxDelay: 10 * 60 * 1000,
   randomness: 0.3,
 });
+
+interface DispatchArgs<T, SpecT> {
+  _specs: SpecSource<T, SpecT>[];
+  _resolve: ((state: T) => void) | undefined;
+  _reject: ((message: string) => void) | undefined;
+}
+
+type State<T, SpecT> =
+  | { _stage: -1 }
+  | { _stage: 0; _queue: DispatchArgs<T, SpecT>[] }
+  | { _stage: 1; _server: Readonly<T>; _local: Readonly<T> };

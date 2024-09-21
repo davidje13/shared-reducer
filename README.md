@@ -106,7 +106,7 @@ ensuring no unexpected fields are added or types are changed).
 ## Usage (Frontend)
 
 ```javascript
-import { SharedReducer, actionsHandledCallback, actionsSyncedCallback } from 'shared-reducer/frontend';
+import { SharedReducer, actionsSyncedCallback } from 'shared-reducer/frontend';
 import context from 'json-immutability-helper';
 
 const reducer = new SharedReducer(context, () => ({
@@ -143,9 +143,10 @@ dispatch([
 ]);
 
 dispatch([
-  actionsHandledCallback((state) => {
+  (state) => {
     console.log('state after handling is', state);
-  }),
+    return [];
+  },
 ]);
 
 dispatch([

@@ -1,16 +1,16 @@
-export class Sentinel {
-  public readonly resolve: () => void;
-  private readonly promise: Promise<void>;
+export class Sentinel<T = unknown> {
+  public readonly resolve: (v: T) => void;
+  private readonly promise: Promise<T>;
   public isResolved = false;
 
   constructor() {
-    let res: () => void;
+    let res: (v: T) => void;
     this.promise = new Promise((resolve) => {
       res = resolve;
     });
-    this.resolve = (...args) => {
+    this.resolve = (v) => {
       this.isResolved = true;
-      res!(...args);
+      res!(v);
     };
   }
 

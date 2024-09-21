@@ -1,8 +1,4 @@
-import {
-  SharedReducer,
-  actionsHandledCallback,
-  actionsSyncedCallback,
-} from 'shared-reducer/frontend';
+import { SharedReducer } from 'shared-reducer/frontend';
 import context, { type Spec } from 'json-immutability-helper';
 
 interface Type {
@@ -29,15 +25,16 @@ dispatch([{ a: ['=', 8] }]);
 dispatch([(state) => [{ a: ['=', Math.pow(2, state.a)] }]]);
 
 dispatch([
-  actionsHandledCallback((state) => {
+  (state) => {
     console.log('state after handling is', state);
-  }),
+    return [];
+  },
 ]);
 
-dispatch([
-  actionsSyncedCallback((state) => {
-    console.log('state after syncing is', state);
-  }),
-]);
+dispatch(
+  [{ a: ['=', 8] }],
+  (state) => console.log('a after syncing is', state.a),
+  (message) => console.log('failed', message.substring(1)),
+);
 
 dispatch([{ a: ['+', 1] }, { a: ['+', 1] }]);

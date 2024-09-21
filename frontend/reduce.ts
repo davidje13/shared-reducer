@@ -1,39 +1,36 @@
-import { type Context, type SpecGenerator, type SpecSource, SyncCallback } from './DispatchSpec';
+import { type Context, type SpecGenerator, type SpecSource } from './DispatchSpec';
 
 interface StackFrame<T> {
-  vs: T[];
-  i: number;
-  prev: StackFrame<T> | null;
+  _values: T[];
+  _index: number;
+  _prev: StackFrame<T> | null;
 }
 
 function iterateStack<T>(initial: T[], fn: (v: T) => T[] | null | undefined) {
-  let cur: StackFrame<T> | null = { vs: initial, i: 0, prev: null };
+  let cur: StackFrame<T> | null = { _values: initial, _index: 0, _prev: null };
   while (cur) {
-    if (cur.i >= cur.vs.length) {
-      cur = cur.prev;
+    if (cur._index >= cur._values.length) {
+      cur = cur._prev;
     } else {
-      const next = fn(cur.vs[cur.i]!);
-      cur.i += 1;
+      const next = fn(cur._values[cur._index]!);
+      ++cur._index;
       if (next && next.length) {
-        cur = { vs: next, i: 0, prev: cur };
+        cur = { _values: next, _index: 0, _prev: cur };
       }
     }
   }
 }
 
 interface ReductionResult<T, SpecT> {
-  state: T;
-  delta: SpecT;
+  _state: T;
+  _delta: SpecT;
 }
 
 export function reduce<T, SpecT>(
   context: Context<T, SpecT>,
-  oldState: T,
+  state: T,
   baseChanges: SpecSource<T, SpecT>[],
-  registerSyncCallback: (fn: SyncCallback<T>, currentState: T) => void,
 ): ReductionResult<T, SpecT> {
-  let state: T = oldState;
-
   const allChanges: SpecT[] = [];
   const aggregate: SpecT[] = [];
   function applyAggregate() {
@@ -46,11 +43,6 @@ export function reduce<T, SpecT>(
   }
 
   iterateStack(baseChanges, (change) => {
-    if (change instanceof SyncCallback) {
-      applyAggregate();
-      registerSyncCallback(change, state);
-      return null;
-    }
     if (typeof change === 'function') {
       applyAggregate();
       const generator = change as SpecGenerator<T, SpecT>;
@@ -62,5 +54,5 @@ export function reduce<T, SpecT>(
     return null;
   });
   applyAggregate();
-  return { state, delta: context.combine(allChanges) };
+  return { _state: state, _delta: context.combine(allChanges) };
 }

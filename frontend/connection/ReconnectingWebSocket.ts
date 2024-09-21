@@ -1,7 +1,14 @@
 import type { MaybePromise } from '../helpers/MaybePromise';
+import { makeEvent, TypedEventTarget } from '../helpers/TypedEventTarget';
 import type { Scheduler } from '../scheduler/Scheduler';
 
-export class ReconnectingWebSocket extends EventTarget {
+type ReconnectingWebSocketEvents = {
+  connected: CustomEvent<void>;
+  disconnected: CustomEvent<DisconnectDetail>;
+  message: CustomEvent<string>;
+};
+
+export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocketEvents> {
   private _ws: WebSocket | null = null;
   private _closed = false;
 
@@ -32,7 +39,7 @@ export class ReconnectingWebSocket extends EventTarget {
           reject(new Error(`handshake failed: ${detail.code} ${detail.reason}`));
         } else {
           this._ws = null;
-          this.dispatchEvent(new CustomEvent('disconnected', { detail }));
+          this.dispatchEvent(makeEvent('disconnected', detail));
           if (!this._closed) {
             this._reconnectScheduler.schedule(this._reconnect);
           }
@@ -52,10 +59,10 @@ export class ReconnectingWebSocket extends EventTarget {
           if (connecting) {
             connecting = false;
             this._ws = ws;
-            this.dispatchEvent(new CustomEvent('connected'));
+            this.dispatchEvent(makeEvent('connected'));
             resolve();
           }
-          this.dispatchEvent(new CustomEvent('message', { detail: e.data }));
+          this.dispatchEvent(makeEvent('message', e.data));
         },
         { signal: connectionSignal },
       );
@@ -75,12 +82,12 @@ export class ReconnectingWebSocket extends EventTarget {
     return this._ws !== null;
   }
 
-  public send(message: string) {
+  public readonly send = (message: string) => {
     if (!this._ws) {
       throw new Error('connection lost');
     }
     this._ws.send(message);
-  }
+  };
 
   public close() {
     this._closed = true;

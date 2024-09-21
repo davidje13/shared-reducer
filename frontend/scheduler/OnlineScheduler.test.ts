@@ -1,3 +1,4 @@
+import { sleep } from '../../test-helpers/sleep';
 import { OnlineScheduler, exponentialDelay } from './OnlineScheduler';
 
 describe('OnlineScheduler', () => {
@@ -88,7 +89,3 @@ describe('exponentialDelay', () => {
     }
   });
 });
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

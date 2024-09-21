@@ -6,6 +6,8 @@ import 'lean-test';
 
 import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverRunner';
 import { BreakableTcpProxy } from '../test-helpers/BreakableTcpProxy';
+import { sleep } from '../test-helpers/sleep';
+import { Sentinel } from '../test-helpers/Sentinel';
 import {
   Broadcaster,
   WebsocketHandlerFactory,
@@ -14,7 +16,13 @@ import {
   ReadOnly,
   type ChangeInfo,
 } from '../backend';
-import { AT_LEAST_ONCE, AT_MOST_ONCE, SharedReducer, type SharedReducerOptions } from '../frontend';
+import {
+  AT_LEAST_ONCE,
+  AT_MOST_ONCE,
+  SharedReducer,
+  type DispatchSpec,
+  type SharedReducerOptions,
+} from '../frontend';
 
 if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
@@ -80,9 +88,7 @@ describe('e2e', () => {
           () => ({ url: host + path }),
           options,
         );
-        r.addEventListener('warning', (e) =>
-          warningHandler(((e as CustomEvent).detail as Error).message),
-        );
+        r.addEventListener('warning', (e) => warningHandler(e.detail.message));
         if (changeHandler) {
           r.addStateListener(changeHandler);
         }
@@ -109,17 +115,16 @@ describe('e2e', () => {
     it('invokes synchronize callbacks when state is first retrieved', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
       expect(state).toEqual({ foo: 'v1', bar: 10 });
     });
 
     it('reflects state changes back to the sender', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
-      reducer.dispatch([{ foo: ['=', 'v2'] }]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync([{ foo: ['=', 'v2'] }]);
 
       expect(state).toEqual({ foo: 'v2', bar: 10 });
     });
@@ -127,11 +132,11 @@ describe('e2e', () => {
     it('accepts chained specs', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 1] }, { bar: ['+', 2] }, { bar: ['+', 3] }]);
       reducer.dispatch([{ bar: ['+', 5] }]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state.bar).toEqual(11);
     });
@@ -139,10 +144,10 @@ describe('e2e', () => {
     it('accepts spec generator functions', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([() => [{ bar: ['=', 2] }]]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state.bar).toEqual(2);
     });
@@ -150,11 +155,11 @@ describe('e2e', () => {
     it('provides current state to state generator functions', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 5] }]);
       reducer.dispatch([(state) => [{ bar: ['=', state.bar * 3] }]]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state.bar).toEqual(15);
     });
@@ -164,10 +169,10 @@ describe('e2e', () => {
     }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 5] }, (state) => [{ bar: ['=', state.bar * 3] }]]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state.bar).toEqual(15);
     });
@@ -175,7 +180,7 @@ describe('e2e', () => {
     it('passes state from previous generators to subsequent generators', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([
         { bar: ['=', 5] },
@@ -184,37 +189,52 @@ describe('e2e', () => {
         { bar: ['+', 1] },
         (state) => [{ bar: ['=', state.bar * 2] }],
       ]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state.bar).toEqual(36);
     });
 
+    it('queues changes until the initial server state is received', async ({ getTyped }) => {
+      const { getReducer } = getTyped(CONTEXT);
+      const reducer = getReducer('/a', fail);
+
+      const generator = mock(
+        (state: TestT): DispatchSpec<TestT, Spec<TestT>> => [{ bar: ['=', state.bar * 3] }],
+      );
+      reducer.dispatch([generator]);
+
+      expect(generator).not(toHaveBeenCalled());
+
+      const state = await reducer.dispatch.sync();
+      expect(state.bar).toEqual(30);
+
+      expect(generator).toHaveBeenCalledWith({ foo: 'v1', bar: 10 });
+    });
+
     it('pushes external state changes', async ({ getTyped }) => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
-      const syncedState = await new Promise((resolve) => {
-        let waiting = false;
-        const reducer = getReducer('/a', fail, (state) => {
-          if (waiting) {
-            resolve(state);
-          }
-        });
-
-        reducer.syncedState().then(() => {
-          waiting = true;
-          return broadcaster.update('a', { foo: ['=', 'v2'] });
-        });
+      const stateSentinel = new Sentinel<TestT>();
+      let waiting = false;
+      const reducer = getReducer('/a', fail, (v) => {
+        if (waiting) {
+          stateSentinel.resolve(v);
+        }
       });
-      expect(syncedState).toEqual({ foo: 'v2', bar: 10 });
+      await reducer.dispatch.sync();
+
+      waiting = true;
+      await broadcaster.update('a', { foo: ['=', 'v2'] });
+      expect(await stateSentinel.await()).toEqual({ foo: 'v2', bar: 10 });
     });
 
     it('merges external state changes', async ({ getTyped }) => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       await broadcaster.update('a', { foo: ['=', 'v2'] });
       reducer.dispatch([{ bar: ['=', 11] }]);
-      const state = await reducer.syncedState();
+      const state = await reducer.dispatch.sync();
 
       expect(state).toEqual({ foo: 'v2', bar: 11 });
     });
@@ -222,7 +242,7 @@ describe('e2e', () => {
     it('maintains local state changes until the server syncs', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([{ foo: ['=', 'v2'] }]);
       expect(reducer.getState()).toEqual({ foo: 'v2', bar: 10 });
@@ -231,14 +251,14 @@ describe('e2e', () => {
     it('applies local state changes on top of the server state', async ({ getTyped }) => {
       const { broadcaster, getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a', fail);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       await broadcaster.update('a', { bar: ['=', 20] });
 
       reducer.dispatch([{ bar: ['+', 5] }]);
       expect(reducer.getState()!.bar).toEqual(15); // not synced with server yet
 
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
       expect(reducer.getState()!.bar).toEqual(25); // now synced, local change applies on top
     });
 
@@ -254,7 +274,7 @@ describe('e2e', () => {
 
       const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_LEAST_ONCE });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
-      expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
 
       proxy.pullWire();
@@ -269,7 +289,7 @@ describe('e2e', () => {
       expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
 
       proxy.resume();
-      expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
 
       expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
       expect(specs).toEqual([
@@ -295,7 +315,7 @@ describe('e2e', () => {
 
       const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_MOST_ONCE });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
-      expect(await reducer.syncedState()).toEqual({ foo: 'while online', bar: 1 });
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
       expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
 
       proxy.pullWire();
@@ -305,7 +325,7 @@ describe('e2e', () => {
 
       await sleep(10);
       proxy.resume();
-      expect(await reducer.syncedState()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect
 
       expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 1 });
       expect(specs).toEqual([
@@ -318,39 +338,35 @@ describe('e2e', () => {
     });
   });
 
-  describe('readonly client', () => {
-    it('invokes the warning callback when the server rejects a change', async ({ getTyped }) => {
+  describe('readonly client rejects changes', () => {
+    it('invokes the warning callback', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
-      await new Promise<void>((resolve) => {
-        const reducer = getReducer('/a/read', (warning: string) => {
-          expect(warning).toEqual('API rejected update: Cannot modify data');
-          resolve();
-        });
+      const warn = new Sentinel<string>();
+      const reducer = getReducer('/a/read', warn.resolve);
 
-        reducer.dispatch([{ bar: ['=', 11] }]);
-      });
+      reducer.dispatch([{ bar: ['=', 11] }]);
+
+      await expect(warn.await).resolves('API rejected update: Cannot modify data');
     });
 
-    it('rolls back local change when rejected by server', async ({ getTyped }) => {
+    it('rolls back the local change', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a/read', () => null);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 11] }]);
       expect(reducer.getState()!.bar).toEqual(11); // not synced with server yet
 
-      await expect(() => reducer.syncedState()).toThrow();
+      await expect(() => reducer.dispatch.sync()).toThrow();
       expect(reducer.getState()!.bar).toEqual(10); // now synced, local change reverted
     });
 
-    it('rejects sync promises when rejected by server', async ({ getTyped }) => {
+    it('rejects sync promises and sends a warning', async ({ getTyped }) => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer = getReducer('/a/read', () => null);
-      await reducer.syncedState();
+      await reducer.dispatch.sync();
 
-      reducer.dispatch([{ bar: ['=', 11] }]);
-
-      await expect(reducer.syncedState()).throws('Cannot modify data');
+      await expect(reducer.dispatch.sync([{ bar: ['=', 11] }])).toThrow('Cannot modify data');
     });
   });
 
@@ -359,13 +375,11 @@ describe('e2e', () => {
       const { getReducer } = getTyped(CONTEXT);
       const reducer1 = getReducer('/a', fail);
       const reducer2 = getReducer('/a', fail);
-      await reducer1.syncedState();
-      await reducer2.syncedState();
+      await reducer1.dispatch.sync();
+      await reducer2.dispatch.sync();
 
-      reducer1.dispatch([{ foo: ['=', 'v2'] }]);
-      await reducer1.syncedState();
-      reducer2.dispatch([{ bar: ['=', 20] }]);
-      await reducer2.syncedState();
+      await reducer1.dispatch.sync([{ foo: ['=', 'v2'] }]);
+      await reducer2.dispatch.sync([{ bar: ['=', 20] }]);
 
       expect(reducer2.getState()).toEqual({ foo: 'v2', bar: 20 });
     });
@@ -375,8 +389,4 @@ describe('e2e', () => {
 interface TestT {
   foo: string;
   bar: number;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
