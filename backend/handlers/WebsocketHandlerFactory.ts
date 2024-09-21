@@ -131,6 +131,11 @@ export class WebsocketHandlerFactory<T, SpecT> {
           }
         });
 
+        if (this.closing) {
+          res.sendError(503, 1012);
+          subscription.close().catch(() => null);
+          return;
+        }
         ws.send(JSON.stringify({ init: subscription.getInitialData() }));
         subscription.listen((msg, id) => {
           const data = id !== undefined ? { id, ...msg } : msg;
