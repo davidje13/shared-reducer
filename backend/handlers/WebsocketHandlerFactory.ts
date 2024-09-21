@@ -16,17 +16,19 @@ interface ServerWebSocket {
 
 interface WSResponse {
   accept(): Promise<ServerWebSocket>;
-  sendError(httpStatus: number): void;
+  sendError(httpStatus: number, wsStatus?: number): void;
   beginTransaction(): void;
   endTransaction(): void;
 }
 
 export class WebsocketHandlerFactory<T, SpecT> {
   private readonly closers = new Set<() => Promise<void>>();
+  private closing = false;
 
   constructor(private readonly broadcaster: Broadcaster<T, SpecT>) {}
 
   public async softClose(timeout: number) {
+    this.closing = true;
     let tm: NodeJS.Timeout | null = null;
     await Promise.race([
       Promise.all([...this.closers].map((c) => c())),
@@ -55,6 +57,10 @@ export class WebsocketHandlerFactory<T, SpecT> {
     };
 
     return async (req: Req, res: Res) => {
+      if (this.closing) {
+        res.sendError(503, 1012);
+        return;
+      }
       const subscription = await handshake(req, res).catch((e) => {
         console.warn('WebSocket init error', e);
         res.sendError(500);

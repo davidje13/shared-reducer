@@ -38,6 +38,7 @@ interface Context {
     options?: SharedReducerOptions<TestT, Spec<TestT>>,
   ): SharedReducer<TestT, Spec<TestT>>;
   proxy: BreakableTcpProxy;
+  handlerFactory: WebsocketHandlerFactory<TestT, Spec<TestT>>;
 }
 
 describe('e2e', () => {
@@ -96,6 +97,7 @@ describe('e2e', () => {
         return r;
       },
       proxy,
+      handlerFactory,
     });
 
     return async () => {
@@ -335,6 +337,27 @@ describe('e2e', () => {
       ]);
 
       s.close();
+    });
+
+    it('pauses sending after a graceful shutdown message', async ({ getTyped }) => {
+      const { getReducer, peekState, handlerFactory } = getTyped(CONTEXT);
+
+      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_LEAST_ONCE });
+      await reducer.dispatch.sync();
+      const clientPromise = reducer.dispatch.sync([{ foo: ['=', 'while closing'] }]);
+      await sleep(0); // wait for client to send message
+      expect(await peekState('a')).not(toEqual('while closing'));
+
+      const closePromise = handlerFactory.softClose(1000);
+      expect(await clientPromise).toEqual({ foo: 'while closing', bar: 10 });
+      expect(await peekState('a')).toEqual({ foo: 'while closing', bar: 10 });
+      await closePromise;
+
+      reducer.dispatch([{ foo: ['=', 'soft closed'] }]);
+      await sleep(10);
+
+      expect(reducer.getState()).toEqual({ foo: 'soft closed', bar: 10 });
+      expect(await peekState('a')).toEqual({ foo: 'while closing', bar: 10 });
     });
   });
 

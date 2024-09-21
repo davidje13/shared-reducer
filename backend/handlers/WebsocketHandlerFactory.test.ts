@@ -179,6 +179,15 @@ describe('WebsocketHandlerFactory', () => {
     await expect(complete.await()).resolves();
     expect(Date.now() - tm0).isLessThan(200);
   });
+
+  it('does not accept new connections after softClose is called', async ({ getTyped }) => {
+    const handlerFactory = makeTestHandlerFactory();
+    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+
+    handlerFactory.softClose(5000);
+
+    await request(server).ws('/a').expectConnectionError(503);
+  });
 });
 
 type TestServerFactory = (
