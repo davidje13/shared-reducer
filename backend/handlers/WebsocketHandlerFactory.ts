@@ -11,7 +11,10 @@ export const CLOSE_ACK = 'x';
 interface ServerWebSocket {
   on(event: 'close', listener: () => void): void;
   on(event: 'message', listener: (data: unknown, isBinary?: boolean) => void): void;
+  on(event: 'pong', listener: () => void): void;
+  ping(): void;
   send(message: string): void;
+  terminate(): void;
 }
 
 interface WSResponse {
@@ -21,11 +24,28 @@ interface WSResponse {
   endTransaction(): void;
 }
 
+export interface WebsocketHandlerOptions {
+  pingInterval?: number;
+  pongTimeout?: number;
+}
+
 export class WebsocketHandlerFactory<T, SpecT> {
   private readonly closers = new Set<() => Promise<void>>();
+  private readonly _pingInterval: number;
+  private readonly _pongTimeout: number;
   private closing = false;
 
-  constructor(private readonly broadcaster: Broadcaster<T, SpecT>) {}
+  constructor(
+    private readonly broadcaster: Broadcaster<T, SpecT>,
+    options: WebsocketHandlerOptions = {},
+  ) {
+    this._pingInterval = options.pingInterval ?? 25_000;
+    this._pongTimeout = options.pongTimeout ?? 30_000;
+  }
+
+  public activeConnections() {
+    return this.closers.size;
+  }
 
   public async softClose(timeout: number) {
     this.closing = true;
@@ -86,12 +106,33 @@ export class WebsocketHandlerFactory<T, SpecT> {
 
         ws.on('close', () => {
           state = 2;
+          clearTimeout(pingTm);
           subscription.close().catch(() => null);
           this.closers.delete(handleSoftClose);
           closed();
         });
 
+        const connectionLost = () => {
+          subscription.close().catch(() => null);
+          this.closers.delete(handleSoftClose);
+          ws.terminate();
+          closed();
+        };
+
+        const ping = () => {
+          ws.ping();
+          clearTimeout(pingTm);
+          pingTm = setTimeout(connectionLost, this._pongTimeout);
+        };
+
+        ws.on('pong', () => {
+          clearTimeout(pingTm);
+          pingTm = setTimeout(ping, this._pingInterval);
+        });
+
         ws.on('message', async (data, isBinary) => {
+          clearTimeout(pingTm);
+          pingTm = setTimeout(ping, this._pingInterval);
           try {
             if (isBinary) {
               throw new Error('Binary messages are not supported');
@@ -141,6 +182,7 @@ export class WebsocketHandlerFactory<T, SpecT> {
           const data = id !== undefined ? { id, ...msg } : msg;
           ws.send(JSON.stringify(data));
         });
+        let pingTm = setTimeout(ping, this._pingInterval);
         this.closers.add(handleSoftClose);
       } catch (e) {
         console.warn('WebSocket error', e);

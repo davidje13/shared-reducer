@@ -3,15 +3,17 @@ import context, { type Spec } from 'json-immutability-helper';
 import type { Request } from 'express';
 import { WebSocketExpress } from 'websocket-express';
 import request from 'superwstest';
+import { Sentinel } from '../../test-helpers/Sentinel';
+import { runLocalServer, closeServer } from '../../test-helpers/serverRunner';
+import { BreakableTcpProxy } from '../../test-helpers/BreakableTcpProxy';
+import { sleep } from '../../test-helpers/sleep';
 import { InMemoryModel } from '../model/InMemoryModel';
 import { Broadcaster } from '../Broadcaster';
 import { ReadWrite } from '../permission/ReadWrite';
 import { ReadOnly } from '../permission/ReadOnly';
 import { ReadWriteStruct } from '../permission/ReadWriteStruct';
-import { Sentinel } from '../../test-helpers/Sentinel';
-import { WebsocketHandlerFactory } from './WebsocketHandlerFactory';
-import { runLocalServer, closeServer } from '../../test-helpers/serverRunner';
 import type { Permission } from '../permission/Permission';
+import { WebsocketHandlerFactory, type WebsocketHandlerOptions } from './WebsocketHandlerFactory';
 
 describe('WebsocketHandlerFactory', () => {
   const SERVER_FACTORY = beforeEach<TestServerFactory>(async ({ setParameter }) => {
@@ -188,6 +190,25 @@ describe('WebsocketHandlerFactory', () => {
 
     await request(server).ws('/a').expectConnectionError(503);
   });
+
+  it('times out if client takes too long to respond to a ping', async ({ getTyped }) => {
+    const handlerFactory = makeTestHandlerFactory({ pingInterval: 100, pongTimeout: 100 });
+    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+    const proxy = new BreakableTcpProxy(server.address());
+    await proxy.listen(0, 'localhost');
+    try {
+      await request(proxy.server).ws('/a').expectJson();
+
+      expect(handlerFactory.activeConnections()).toEqual(1);
+      proxy.pullWire();
+      await sleep(80);
+      expect(handlerFactory.activeConnections()).toEqual(1);
+      await sleep(150);
+      expect(handlerFactory.activeConnections()).toEqual(0);
+    } finally {
+      proxy.close();
+    }
+  });
 });
 
 type TestServerFactory = (
@@ -199,12 +220,12 @@ interface TestT {
   foo: string;
 }
 
-function makeTestHandlerFactory() {
+function makeTestHandlerFactory(options?: WebsocketHandlerOptions) {
   const model = new InMemoryModel(validateTestT);
   model.set('a', { foo: 'v1' });
 
   const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
-  return new WebsocketHandlerFactory(broadcaster);
+  return new WebsocketHandlerFactory(broadcaster, options);
 }
 
 function validateTestT(x: unknown): TestT {
