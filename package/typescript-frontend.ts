@@ -1,5 +1,5 @@
-import { SharedReducer } from 'shared-reducer/frontend';
 import context, { type Spec } from 'json-immutability-helper';
+import { SharedReducer } from 'shared-reducer/frontend';
 
 interface Type {
   a: number;

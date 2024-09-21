@@ -1,12 +1,12 @@
+import context, { type Spec } from 'json-immutability-helper';
+import { Request } from 'express';
+import { WebSocketExpress } from 'websocket-express';
 import {
   Broadcaster,
   WebsocketHandlerFactory,
   ReadWrite,
   InMemoryModel,
 } from 'shared-reducer/backend';
-import context, { type Spec } from 'json-immutability-helper';
-import { Request } from 'express';
-import { WebSocketExpress } from 'websocket-express';
 
 interface Type {
   foo: string;
