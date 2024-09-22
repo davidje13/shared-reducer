@@ -1,7 +1,7 @@
 import type { Server } from 'node:http';
 import context, { type Spec } from 'json-immutability-helper';
 import type { Request } from 'express';
-import { WebSocketExpress } from 'websocket-express';
+import { WebSocketExpress, type Router, type WSRequestHandler } from 'websocket-express';
 import request from 'superwstest';
 import { Sentinel } from '../../test-helpers/Sentinel';
 import { runLocalServer, closeServer } from '../../test-helpers/serverRunner';
@@ -16,39 +16,23 @@ import type { Permission } from '../permission/Permission';
 import { WebsocketHandlerFactory, type WebsocketHandlerOptions } from './WebsocketHandlerFactory';
 
 describe('WebsocketHandlerFactory', () => {
-  const SERVER_FACTORY = beforeEach<TestServerFactory>(async ({ setParameter }) => {
+  const SERVER_FACTORY = beforeEach<TestSetup>(async ({ setParameter }) => {
     const app = new WebSocketExpress();
     const server = await runLocalServer(app);
 
-    setParameter((handlerFactory, permission) => {
-      app.ws(
-        '/:id',
-        handlerFactory.handler(
-          (req: Request) => {
-            const id = req.params['id'];
-            if (id === 'error') {
-              throw new Error('oops');
-            }
-            return id ?? '';
-          },
-          () => permission,
-        ),
-      );
-
-      return server;
-    });
+    setParameter({ app, server });
 
     return () => closeServer(server);
   });
 
   it('creates a websocket-express compatible handler', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server).ws('/a');
   });
 
   it('returns the initial state', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server)
       .ws('/a')
@@ -56,7 +40,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('reflects changes', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server)
       .ws('/a')
@@ -66,7 +50,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('rejects invalid messages', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server)
       .ws('/a')
@@ -76,13 +60,13 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('handles errors from the idGetter', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server).ws('/error').expectConnectionError(500);
   });
 
   it('rejects changes in read-only mode', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadOnly);
+    const { server } = setupServer(getTyped(SERVER_FACTORY), { permission: ReadOnly });
 
     await request(server)
       .ws('/a')
@@ -92,7 +76,9 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('rejects changes forbidden by permissions', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), new ReadWriteStruct(['foo']));
+    const { server } = setupServer(getTyped(SERVER_FACTORY), {
+      permission: new ReadWriteStruct(['foo']),
+    });
 
     await request(server)
       .ws('/a')
@@ -102,7 +88,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('rejects changes forbidden by model', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server)
       .ws('/a')
@@ -112,7 +98,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('reflects id field if provided', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server)
       .ws('/a')
@@ -122,7 +108,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('sends updates to other subscribers without id field', async ({ getTyped }) => {
-    const server = getTyped(SERVER_FACTORY)(makeTestHandlerFactory(), ReadWrite);
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     const sentinel = new Sentinel();
 
@@ -147,8 +133,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('sends close message when softClose is called', async ({ getTyped }) => {
-    const handlerFactory = makeTestHandlerFactory();
-    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
     const complete = new Sentinel();
 
     await request(server)
@@ -165,8 +150,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('times out if client takes too long to respond to a close signal', async ({ getTyped }) => {
-    const handlerFactory = makeTestHandlerFactory();
-    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
     const complete = new Sentinel();
 
     await request(server)
@@ -183,8 +167,7 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('does not accept new connections after softClose is called', async ({ getTyped }) => {
-    const handlerFactory = makeTestHandlerFactory();
-    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
 
     handlerFactory.softClose(5000);
 
@@ -192,8 +175,9 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('times out if client takes too long to respond to a ping', async ({ getTyped }) => {
-    const handlerFactory = makeTestHandlerFactory({ pingInterval: 100, pongTimeout: 100 });
-    const server = getTyped(SERVER_FACTORY)(handlerFactory, ReadWrite);
+    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY), {
+      handlerOptions: { pingInterval: 100, pongTimeout: 100 },
+    });
     const proxy = new BreakableTcpProxy(server.address());
     await proxy.listen(0, 'localhost');
     try {
@@ -209,23 +193,77 @@ describe('WebsocketHandlerFactory', () => {
       proxy.close();
     }
   });
+
+  it.ignore('waits for authentication if configured', async ({ getTyped }) => {
+    let capturedToken = '';
+    const { server } = setupServer(getTyped(SERVER_FACTORY), {
+      middleware: [
+        WebSocketExpress.requireBearerAuth(
+          () => '',
+          (token) => {
+            capturedToken = token;
+            return {};
+          },
+        ),
+      ],
+    });
+
+    await request(server)
+      .ws('/a')
+      .send('my-token')
+      .exec(() => expect(capturedToken).toEqual('my-token'))
+      .expectJson({ init: { foo: 'v1' } });
+  });
+
+  it('survives if the connection is immediately closed', async ({ getTyped }) => {
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
+
+    await request(server).ws('/a').close().expectClosed();
+  });
 });
 
-type TestServerFactory = (
-  handlerFactory: WebsocketHandlerFactory<TestT, Spec<TestT>>,
-  permission: Permission<TestT, Spec<TestT>>,
-) => Server;
+interface TestSetup {
+  app: Router;
+  server: Server;
+}
 
 interface TestT {
   foo: string;
 }
 
-function makeTestHandlerFactory(options?: WebsocketHandlerOptions) {
+function setupServer(
+  setup: TestSetup,
+  {
+    middleware = [],
+    handlerOptions,
+    permission = ReadWrite,
+  }: {
+    middleware?: WSRequestHandler[];
+    handlerOptions?: WebsocketHandlerOptions;
+    permission?: Permission<TestT, Spec<TestT>>;
+  } = {},
+) {
   const model = new InMemoryModel(validateTestT);
   model.set('a', { foo: 'v1' });
 
   const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
-  return new WebsocketHandlerFactory(broadcaster, options);
+  const handlerFactory = new WebsocketHandlerFactory(broadcaster, handlerOptions);
+  setup.app.ws(
+    '/:id',
+    ...middleware,
+    handlerFactory.handler(
+      (req: Request) => {
+        const id = req.params['id'];
+        if (id === 'error') {
+          throw new Error('oops');
+        }
+        return id ?? '';
+      },
+      () => permission,
+    ),
+  );
+
+  return { server: setup.server, handlerFactory };
 }
 
 function validateTestT(x: unknown): TestT {
