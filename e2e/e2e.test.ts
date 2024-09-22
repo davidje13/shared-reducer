@@ -22,6 +22,8 @@ import {
 import {
   AT_LEAST_ONCE,
   AT_MOST_ONCE,
+  exponentialDelay,
+  OnlineScheduler,
   SharedReducer,
   type DispatchSpec,
   type SharedReducerOptions,
@@ -237,6 +239,7 @@ describe('e2e', () => {
       const reducer = getReducer<TestT>(proxy.server, '/a', {
         warningHandler: () => null,
         deliveryStrategy: AT_LEAST_ONCE,
+        scheduler: new OnlineScheduler(rapidRetry, 1000),
       });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
@@ -283,6 +286,7 @@ describe('e2e', () => {
       const reducer = getReducer<TestT>(proxy.server, '/a', {
         warningHandler: () => null,
         deliveryStrategy: AT_MOST_ONCE,
+        scheduler: new OnlineScheduler(rapidRetry, 1000),
       });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
@@ -311,7 +315,7 @@ describe('e2e', () => {
       const { broadcaster, server, handlerFactory, getReducer } =
         await getTyped(RUNNER).basicSetup(INITIAL_STATE);
 
-      const reducer = getReducer<TestT>(server, '/a', { deliveryStrategy: AT_LEAST_ONCE });
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
       const clientPromise = reducer.dispatch.sync([{ foo: ['=', 'while closing'] }]);
       await sleep(0); // wait for client to send message
@@ -472,6 +476,8 @@ interface TestT {
   foo: string;
   bar: number;
 }
+
+const rapidRetry = exponentialDelay({ initialDelay: 100, maxDelay: 300 });
 
 const INITIAL_STATE: TestT = { foo: 'v1', bar: 10 };
 

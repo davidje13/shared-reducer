@@ -253,7 +253,7 @@ const CLOSE_DETAIL: DisconnectDetail = { code: 0, reason: 'graceful shutdown' };
 
 const DEFAULT_RECONNECT = exponentialDelay({
   base: 2,
-  initialDelay: 200,
+  initialDelay: 1000,
   maxDelay: 10 * 60 * 1000,
   randomness: 0.3,
 });
