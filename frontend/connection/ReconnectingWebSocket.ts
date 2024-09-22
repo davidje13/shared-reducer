@@ -127,7 +127,7 @@ function schedulePings(ws: WebSocket) {
   ws.addEventListener('message', schedule, { signal: ac.signal });
   ws.addEventListener('close', stop, { signal: ac.signal });
   ws.addEventListener('error', stop, { signal: ac.signal });
-  global.addEventListener?.('offline', ping, { signal: ac.signal });
+  globalThis.addEventListener?.('offline', ping, { signal: ac.signal });
 }
 
 export interface ConnectionInfo {

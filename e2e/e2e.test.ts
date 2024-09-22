@@ -29,8 +29,8 @@ import {
   type SharedReducerOptions,
 } from '../frontend';
 
-if (!global.WebSocket) {
-  (global as any).WebSocket = WebSocket;
+if (!globalThis.WebSocket) {
+  globalThis.WebSocket = WebSocket as typeof globalThis.WebSocket;
 }
 
 describe('e2e', () => {

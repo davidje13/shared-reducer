@@ -34,14 +34,14 @@ export class OnlineScheduler implements Scheduler {
     if (this._timeout !== null) {
       return;
     }
-    if (global.document?.visibilityState === 'hidden') {
-      global.addEventListener?.('visibilitychange', this._attempt);
+    if (globalThis.document?.visibilityState === 'hidden') {
+      globalThis.addEventListener?.('visibilitychange', this._attempt);
     } else {
-      global.addEventListener?.('online', this._attempt);
+      globalThis.addEventListener?.('online', this._attempt);
       this._timeout = setTimeout(this._attempt, this._delayGetter(this._attempts));
     }
-    global.addEventListener?.('pageshow', this._attempt);
-    global.addEventListener?.('focus', this._attempt);
+    globalThis.addEventListener?.('pageshow', this._attempt);
+    globalThis.addEventListener?.('focus', this._attempt);
     ++this._attempts;
   }
 
@@ -94,10 +94,10 @@ export class OnlineScheduler implements Scheduler {
     }
     clearTimeout(this._timeout);
     this._timeout = null;
-    global.removeEventListener?.('online', this._attempt);
-    global.removeEventListener?.('pageshow', this._attempt);
-    global.removeEventListener?.('visibilitychange', this._attempt);
-    global.removeEventListener?.('focus', this._attempt);
+    globalThis.removeEventListener?.('online', this._attempt);
+    globalThis.removeEventListener?.('pageshow', this._attempt);
+    globalThis.removeEventListener?.('visibilitychange', this._attempt);
+    globalThis.removeEventListener?.('focus', this._attempt);
   }
 }
 

@@ -33,7 +33,7 @@
   },
   "scripts": {
     "format": "prettier --write .",
-    "test": "lean-test --preprocess=tsc --parallel-suites && package/build.sh && package/run.sh && tsc && prettier --check .",
+    "test": "lean-test --preprocess=tsc --parallel-suites && lean-test --target=chrome --preprocess=tsc --import-map --parallel-suites frontend/scheduler frontend/helpers && package/build.sh && package/run.sh && tsc && prettier --check .",
     "dopublish": "package/build.sh && npm publish package.tgz"
   },
   "repository": {
