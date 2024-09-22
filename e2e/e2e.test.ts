@@ -1,5 +1,6 @@
+import type { Server } from 'node:net';
 import context, { type Spec } from 'json-immutability-helper';
-import type { Request } from 'express';
+import type { Application, Request } from 'express';
 import { WebSocketExpress } from 'websocket-express';
 import { WebSocket } from 'ws';
 import 'lean-test';
@@ -8,6 +9,7 @@ import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverR
 import { BreakableTcpProxy } from '../test-helpers/BreakableTcpProxy';
 import { sleep } from '../test-helpers/sleep';
 import { Sentinel } from '../test-helpers/Sentinel';
+
 import {
   Broadcaster,
   WebsocketHandlerFactory,
@@ -15,6 +17,7 @@ import {
   ReadWrite,
   ReadOnly,
   type ChangeInfo,
+  type Permission,
 } from '../backend';
 import {
   AT_LEAST_ONCE,
@@ -28,102 +31,56 @@ if (!global.WebSocket) {
   (global as any).WebSocket = WebSocket;
 }
 
-interface Context {
-  broadcaster: Broadcaster<TestT, Spec<TestT>>;
-  peekState(id: string): Promise<TestT | null>;
-  getReducer(
-    path: string,
-    warningHandler: (warning: string) => void,
-    changeHandler?: (state: TestT) => void,
-    options?: SharedReducerOptions<TestT, Spec<TestT>>,
-  ): SharedReducer<TestT, Spec<TestT>>;
-  proxy: BreakableTcpProxy;
-  handlerFactory: WebsocketHandlerFactory<TestT, Spec<TestT>>;
-}
-
 describe('e2e', () => {
-  const CONTEXT = beforeEach<Context>(async ({ setParameter }) => {
-    const model = new InMemoryModel<string, TestT>();
-    const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
-
-    const app = new WebSocketExpress();
-    const handlerFactory = new WebsocketHandlerFactory(broadcaster);
-    app.ws(
-      '/:id/read',
-      handlerFactory.handler(
-        (req: Request) => req.params['id'] ?? '',
-        () => ReadOnly,
-      ),
-    );
-    app.ws(
-      '/:id',
-      handlerFactory.handler(
-        (req: Request) => req.params['id'] ?? '',
-        () => ReadWrite,
-      ),
-    );
-
-    model.set('a', { foo: 'v1', bar: 10 });
-    const server = await runLocalServer(app);
-    const proxy = new BreakableTcpProxy(server.address());
-    await proxy.listen(0, 'localhost');
-    const host = getAddress(proxy.server, 'ws');
-    const reducers: SharedReducer<any, any>[] = [];
-
-    setParameter({
-      broadcaster,
-      peekState: async (id) => {
-        const s = await broadcaster.subscribe(id);
-        if (!s) {
-          return null;
-        }
-        try {
-          return s.getInitialData();
-        } finally {
-          await s.close();
-        }
-      },
-      getReducer: (path, warningHandler, changeHandler, options) => {
-        const r = new SharedReducer<TestT, Spec<TestT>>(
-          context,
-          () => ({ url: host + path }),
-          options,
-        );
-        r.addEventListener('warning', (e) => warningHandler(e.detail.message));
-        if (changeHandler) {
-          r.addStateListener(changeHandler);
-        }
-        reducers.push(r);
-        return r;
-      },
-      proxy,
-      handlerFactory,
-    });
-
-    return async () => {
-      reducers.forEach((r) => r.close());
-      await closeServer(server);
-      await proxy.close();
-    };
-  });
-
   describe('one client', () => {
     it('sends initial state from server to client', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const initialState = await new Promise((resolve) => getReducer('/a', fail, resolve));
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
+      const initialState = await new Promise((resolve) => reducer.addStateListener(resolve));
       expect(initialState).toEqual({ foo: 'v1', bar: 10 });
     });
 
+    it('sends any required authentication before beginning', async ({ getTyped }) => {
+      const runner = getTyped(RUNNER);
+      const model = new InMemoryModel<string, TestT>();
+      model.set('a', { foo: 'v1', bar: 10 });
+      const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
+      const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+      let capturedToken = '';
+      const app = new WebSocketExpress();
+      app.ws(
+        '/:id',
+        WebSocketExpress.requireBearerAuth(
+          () => '',
+          (token) => {
+            capturedToken = token;
+            return {};
+          },
+        ),
+        handlerFactory.handler(
+          (req: Request) => req.params['id'] ?? '',
+          () => ReadWrite,
+        ),
+      );
+      const server = await runner.runServer(app);
+
+      const reducer = runner.getReducer<TestT>(server, '/a', { token: 'my-token' });
+
+      const initialState = await new Promise((resolve) => reducer.addStateListener(resolve));
+      expect(initialState).toEqual({ foo: 'v1', bar: 10 });
+      expect(capturedToken).toEqual('my-token');
+    });
+
     it('invokes synchronize callbacks when state is first retrieved', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       const state = await reducer.dispatch.sync();
       expect(state).toEqual({ foo: 'v1', bar: 10 });
     });
 
     it('reflects state changes back to the sender', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       const state = await reducer.dispatch.sync([{ foo: ['=', 'v2'] }]);
@@ -132,8 +89,8 @@ describe('e2e', () => {
     });
 
     it('accepts chained specs', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 1] }, { bar: ['+', 2] }, { bar: ['+', 3] }]);
@@ -144,8 +101,8 @@ describe('e2e', () => {
     });
 
     it('accepts spec generator functions', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([() => [{ bar: ['=', 2] }]]);
@@ -155,8 +112,8 @@ describe('e2e', () => {
     });
 
     it('provides current state to state generator functions', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 5] }]);
@@ -169,8 +126,8 @@ describe('e2e', () => {
     it('provides current state to state generator functions when chaining', async ({
       getTyped,
     }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 5] }, (state) => [{ bar: ['=', state.bar * 3] }]]);
@@ -180,8 +137,8 @@ describe('e2e', () => {
     });
 
     it('passes state from previous generators to subsequent generators', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([
@@ -197,8 +154,8 @@ describe('e2e', () => {
     });
 
     it('queues changes until the initial server state is received', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
 
       const generator = mock(
         (state: TestT): DispatchSpec<TestT, Spec<TestT>> => [{ bar: ['=', state.bar * 3] }],
@@ -214,10 +171,11 @@ describe('e2e', () => {
     });
 
     it('pushes external state changes', async ({ getTyped }) => {
-      const { broadcaster, getReducer } = getTyped(CONTEXT);
+      const { broadcaster, server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       const stateSentinel = new Sentinel<TestT>();
       let waiting = false;
-      const reducer = getReducer('/a', fail, (v) => {
+      reducer.addStateListener((v) => {
         if (waiting) {
           stateSentinel.resolve(v);
         }
@@ -230,8 +188,8 @@ describe('e2e', () => {
     });
 
     it('merges external state changes', async ({ getTyped }) => {
-      const { broadcaster, getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { broadcaster, server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       await broadcaster.update('a', { foo: ['=', 'v2'] });
@@ -242,8 +200,8 @@ describe('e2e', () => {
     });
 
     it('maintains local state changes until the server syncs', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       reducer.dispatch([{ foo: ['=', 'v2'] }]);
@@ -251,8 +209,8 @@ describe('e2e', () => {
     });
 
     it('applies local state changes on top of the server state', async ({ getTyped }) => {
-      const { broadcaster, getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a', fail);
+      const { broadcaster, server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
 
       await broadcaster.update('a', { bar: ['=', 20] });
@@ -265,7 +223,9 @@ describe('e2e', () => {
     });
 
     it('reconnects and resends changes if the connection is lost', async ({ getTyped }) => {
-      const { getReducer, broadcaster, peekState, proxy } = getTyped(CONTEXT);
+      const { broadcaster, server, runProxy, getReducer } =
+        await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const proxy = await runProxy(server);
 
       const specs: ChangeInfo<Spec<TestT>>[] = [];
       const s = await broadcaster.subscribe('a');
@@ -274,10 +234,13 @@ describe('e2e', () => {
       }
       s.listen((s) => specs.push(s));
 
-      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_LEAST_ONCE });
+      const reducer = getReducer<TestT>(proxy.server, '/a', {
+        warningHandler: () => null,
+        deliveryStrategy: AT_LEAST_ONCE,
+      });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
-      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while online', bar: 1 });
 
       proxy.pullWire();
       reducer.dispatch([{ bar: ['=', 2] }]); // will try to send before realising connection is gone
@@ -287,13 +250,13 @@ describe('e2e', () => {
       await sleep(30);
 
       expect(reducer.getState()).toEqual({ foo: 'while offline', bar: 2 });
-      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while online', bar: 1 });
       expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
 
       proxy.resume();
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
 
-      expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
       expect(specs).toEqual([
         { change: ['=', { foo: 'while online', bar: 1 }] },
         { change: { bar: ['=', 2] } },
@@ -306,7 +269,9 @@ describe('e2e', () => {
     it('AT_MOST_ONCE discards changes which may have already been received', async ({
       getTyped,
     }) => {
-      const { getReducer, broadcaster, peekState, proxy } = getTyped(CONTEXT);
+      const { broadcaster, server, runProxy, getReducer } =
+        await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const proxy = await runProxy(server);
 
       const specs: ChangeInfo<Spec<TestT>>[] = [];
       const s = await broadcaster.subscribe('a');
@@ -315,10 +280,13 @@ describe('e2e', () => {
       }
       s.listen((s) => specs.push(s));
 
-      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_MOST_ONCE });
+      const reducer = getReducer<TestT>(proxy.server, '/a', {
+        warningHandler: () => null,
+        deliveryStrategy: AT_MOST_ONCE,
+      });
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
-      expect(await peekState('a')).toEqual({ foo: 'while online', bar: 1 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while online', bar: 1 });
 
       proxy.pullWire();
       reducer.dispatch([{ bar: ['=', 2] }]); // will try to send before realising connection is gone
@@ -329,7 +297,7 @@ describe('e2e', () => {
       proxy.resume();
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect
 
-      expect(await peekState('a')).toEqual({ foo: 'while offline', bar: 1 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 1 });
       expect(specs).toEqual([
         { change: ['=', { foo: 'while online', bar: 1 }] },
         // bar=2 change is lost - client does not know if it was received when the wire was pulled
@@ -340,32 +308,33 @@ describe('e2e', () => {
     });
 
     it('pauses sending after a graceful shutdown message', async ({ getTyped }) => {
-      const { getReducer, peekState, handlerFactory } = getTyped(CONTEXT);
+      const { broadcaster, server, handlerFactory, getReducer } =
+        await getTyped(RUNNER).basicSetup(INITIAL_STATE);
 
-      const reducer = getReducer('/a', fail, () => null, { deliveryStrategy: AT_LEAST_ONCE });
+      const reducer = getReducer<TestT>(server, '/a', { deliveryStrategy: AT_LEAST_ONCE });
       await reducer.dispatch.sync();
       const clientPromise = reducer.dispatch.sync([{ foo: ['=', 'while closing'] }]);
       await sleep(0); // wait for client to send message
-      expect(await peekState('a')).not(toEqual('while closing'));
+      expect(await peekState(broadcaster, 'a')).not(toEqual('while closing'));
 
       const closePromise = handlerFactory.softClose(1000);
       expect(await clientPromise).toEqual({ foo: 'while closing', bar: 10 });
-      expect(await peekState('a')).toEqual({ foo: 'while closing', bar: 10 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while closing', bar: 10 });
       await closePromise;
 
       reducer.dispatch([{ foo: ['=', 'soft closed'] }]);
       await sleep(10);
 
       expect(reducer.getState()).toEqual({ foo: 'soft closed', bar: 10 });
-      expect(await peekState('a')).toEqual({ foo: 'while closing', bar: 10 });
+      expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while closing', bar: 10 });
     });
   });
 
   describe('readonly client rejects changes', () => {
     it('invokes the warning callback', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE, ReadOnly);
       const warn = new Sentinel<string>();
-      const reducer = getReducer('/a/read', warn.resolve);
+      const reducer = getReducer<TestT>(server, '/a', { warningHandler: warn.resolve });
 
       reducer.dispatch([{ bar: ['=', 11] }]);
 
@@ -373,8 +342,8 @@ describe('e2e', () => {
     });
 
     it('rolls back the local change', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a/read', () => null);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE, ReadOnly);
+      const reducer = getReducer<TestT>(server, '/a', { warningHandler: () => null });
       await reducer.dispatch.sync();
 
       reducer.dispatch([{ bar: ['=', 11] }]);
@@ -385,8 +354,8 @@ describe('e2e', () => {
     });
 
     it('rejects sync promises and sends a warning', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer = getReducer('/a/read', () => null);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE, ReadOnly);
+      const reducer = getReducer<TestT>(server, '/a', { warningHandler: () => null });
       await reducer.dispatch.sync();
 
       await expect(reducer.dispatch.sync([{ bar: ['=', 11] }])).toThrow('Cannot modify data');
@@ -395,9 +364,9 @@ describe('e2e', () => {
 
   describe('two clients', () => {
     it('pushes changes between clients', async ({ getTyped }) => {
-      const { getReducer } = getTyped(CONTEXT);
-      const reducer1 = getReducer('/a', fail);
-      const reducer2 = getReducer('/a', fail);
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer1 = getReducer<TestT>(server, '/a');
+      const reducer2 = getReducer<TestT>(server, '/a');
       await reducer1.dispatch.sync();
       await reducer2.dispatch.sync();
 
@@ -407,9 +376,113 @@ describe('e2e', () => {
       expect(reducer2.getState()).toEqual({ foo: 'v2', bar: 20 });
     });
   });
+
+  const RUNNER = beforeEach<Runner>(({ setParameter }) => {
+    const reducers: SharedReducer<any, any>[] = [];
+    const proxies: BreakableTcpProxy[] = [];
+    const servers: Server[] = [];
+
+    const runner: Runner = {
+      runServer: async (app: Application) => {
+        const server = await runLocalServer(app);
+        servers.push(server);
+        return server;
+      },
+      runProxy: async (target: Server) => {
+        const proxy = new BreakableTcpProxy(target.address());
+        await proxy.listen(0, 'localhost');
+        proxies.push(proxy);
+        return proxy;
+      },
+      getReducer: <T>(
+        server: Server,
+        path: string,
+        {
+          warningHandler = fail,
+          token,
+          ...options
+        }: SharedReducerOptions<T, Spec<T>> & ReducerOptions = {},
+      ) => {
+        const host = getAddress(server, 'ws');
+        const reducer = new SharedReducer<T, Spec<T>>(
+          context,
+          () => ({ url: host + path, token }),
+          options,
+        );
+        reducer.addEventListener('warning', (e) => warningHandler(e.detail.message));
+        reducers.push(reducer);
+        return reducer;
+      },
+
+      basicSetup: async <T>(initialState: T, permission = ReadWrite) => {
+        const model = new InMemoryModel<string, T>();
+        model.set('a', initialState);
+        const broadcaster = new Broadcaster<T, Spec<T>>(model, context);
+        const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+        const app = new WebSocketExpress();
+        app.ws(
+          '/:id',
+          handlerFactory.handler(
+            (req: Request) => req.params['id'] ?? '',
+            () => permission,
+          ),
+        );
+        const server = await runner.runServer(app);
+
+        return { ...runner, broadcaster, handlerFactory, server };
+      },
+    };
+
+    setParameter(runner);
+
+    return async () => {
+      reducers.forEach((r) => r.close());
+      await Promise.all(servers.map(closeServer));
+      await Promise.all(proxies.map((p) => p.close()));
+    };
+  });
 });
+
+interface ReducerOptions {
+  token?: string;
+  warningHandler?: (message: string) => void;
+}
+
+interface Runner {
+  runServer(app: Application): Promise<Server>;
+  runProxy(target: Server): Promise<BreakableTcpProxy>;
+  getReducer<T>(
+    server: Server,
+    path: string,
+    options?: SharedReducerOptions<T, Spec<T>> & ReducerOptions,
+  ): SharedReducer<T, Spec<T>>;
+  basicSetup<T>(
+    initialState: T,
+    permission?: Permission<T, Spec<T>>,
+  ): Promise<
+    Runner & {
+      broadcaster: Broadcaster<T, Spec<T>>;
+      handlerFactory: WebsocketHandlerFactory<T, Spec<T>>;
+      server: Server;
+    }
+  >;
+}
 
 interface TestT {
   foo: string;
   bar: number;
+}
+
+const INITIAL_STATE: TestT = { foo: 'v1', bar: 10 };
+
+async function peekState<T>(broadcaster: Broadcaster<T, any>, id: string): Promise<T | null> {
+  const s = await broadcaster.subscribe(id);
+  if (!s) {
+    return null;
+  }
+  try {
+    return s.getInitialData();
+  } finally {
+    await s.close();
+  }
 }

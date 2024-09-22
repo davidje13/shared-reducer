@@ -5,6 +5,7 @@ import type { Scheduler } from '../scheduler/Scheduler';
 type ReconnectingWebSocketEvents = {
   connected: CustomEvent<void>;
   disconnected: CustomEvent<DisconnectDetail>;
+  connectionfailure: CustomEvent<DisconnectDetail>;
   message: CustomEvent<string>;
 };
 
@@ -36,6 +37,7 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
         ws.close();
         if (connecting) {
           connecting = false;
+          this.dispatchEvent(makeEvent('connectionfailure', detail));
           reject(new Error(`handshake failed: ${detail.code} ${detail.reason}`));
         } else {
           this._ws = null;
@@ -130,7 +132,7 @@ function schedulePings(ws: WebSocket) {
 
 export interface ConnectionInfo {
   url: string;
-  token?: string;
+  token?: string | undefined;
 }
 
 export type ConnectionGetter = (signal: AbortSignal) => MaybePromise<ConnectionInfo>;

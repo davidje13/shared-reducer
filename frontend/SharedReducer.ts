@@ -51,6 +51,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this._ws = new ReconnectingWebSocket(connectionGetter, scheduler);
     this._ws.addEventListener('message', this._handleMessage);
     this._ws.addEventListener('connected', this._handleConnected);
+    this._ws.addEventListener('connectionfailure', this._handleConnectionFailure);
     this._ws.addEventListener('disconnected', this._handleDisconnected);
   }
 
@@ -207,6 +208,12 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this.dispatchEvent(makeEvent('connected'));
   };
 
+  private readonly _handleConnectionFailure = (e: CustomEvent<DisconnectDetail>) => {
+    this.dispatchEvent(
+      makeEvent('warning', new Error(`connection failure: ${e.detail.code} ${e.detail.reason}`)),
+    );
+  };
+
   private readonly _handleDisconnected = (e: CustomEvent<DisconnectDetail>) => {
     if (!this._paused) {
       this._paused = true;
@@ -222,6 +229,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this._listeners.clear();
     this._ws.removeEventListener('message', this._handleMessage);
     this._ws.removeEventListener('connected', this._handleConnected);
+    this._ws.removeEventListener('connectionfailure', this._handleConnectionFailure);
     this._ws.removeEventListener('disconnected', this._handleDisconnected);
   }
 }
