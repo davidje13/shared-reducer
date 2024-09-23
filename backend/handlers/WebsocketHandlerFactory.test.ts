@@ -194,29 +194,26 @@ describe('WebsocketHandlerFactory', () => {
     }
   });
 
-  it.ignore('waits for authentication if configured', async ({ getTyped }) => {
-    let capturedToken = '';
-    const { server } = setupServer(getTyped(SERVER_FACTORY), {
-      middleware: [
-        WebSocketExpress.requireBearerAuth(
-          () => '',
-          (token) => {
-            capturedToken = token;
-            return {};
-          },
-        ),
-      ],
-    });
+  it('waits for authentication if configured', async ({ getTyped }) => {
+    const auth = mockAuth();
+    const { server } = setupServer(getTyped(SERVER_FACTORY), { middleware: [auth.middleware] });
 
     await request(server)
       .ws('/a')
       .send('my-token')
-      .exec(() => expect(capturedToken).toEqual('my-token'))
-      .expectJson({ init: { foo: 'v1' } });
+      .expectJson({ init: { foo: 'v1' } })
+      .exec(() => expect(auth.capturedToken).toEqual('my-token'));
   });
 
   it('survives if the connection is immediately closed', async ({ getTyped }) => {
     const { server } = setupServer(getTyped(SERVER_FACTORY));
+
+    await request(server).ws('/a').close().expectClosed();
+  });
+
+  it.ignore('survives if the connection is closed while authenticating', async ({ getTyped }) => {
+    const auth = mockAuth();
+    const { server } = setupServer(getTyped(SERVER_FACTORY), { middleware: [auth.middleware] });
 
     await request(server).ws('/a').close().expectClosed();
   });
@@ -264,6 +261,20 @@ function setupServer(
   );
 
   return { server: setup.server, handlerFactory };
+}
+
+function mockAuth() {
+  const r = {
+    capturedToken: '',
+    middleware: WebSocketExpress.requireBearerAuth(
+      () => '',
+      (token) => {
+        r.capturedToken = token;
+        return {};
+      },
+    ),
+  };
+  return r;
 }
 
 function validateTestT(x: unknown): TestT {
