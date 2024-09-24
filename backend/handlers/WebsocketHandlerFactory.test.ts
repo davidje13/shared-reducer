@@ -211,7 +211,7 @@ describe('WebsocketHandlerFactory', () => {
     await request(server).ws('/a').close().expectClosed();
   });
 
-  it.ignore('survives if the connection is closed while authenticating', async ({ getTyped }) => {
+  it('survives if the connection is closed while authenticating', async ({ getTyped }) => {
     const auth = mockAuth();
     const { server } = setupServer(getTyped(SERVER_FACTORY), { middleware: [auth.middleware] });
 
