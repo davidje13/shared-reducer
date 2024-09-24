@@ -23,8 +23,22 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
   }
 
   private async _reconnect(s: AbortSignal) {
-    const { url, token } = await this._connectionGetter(s);
-    s.throwIfAborted();
+    let url: string;
+    let token: string | undefined;
+    try {
+      const c = await this._connectionGetter(s);
+      url = c.url;
+      token = c.token;
+    } catch (e) {
+      this.dispatchEvent(
+        makeEvent('connectionfailure', { code: 0, reason: `connection getter threw: ${e}` }),
+      );
+      throw e;
+    }
+    if (s.aborted) {
+      // AbortSignal.throwIfAborted is not currently supported in JSDOM
+      throw s.reason;
+    }
 
     const connectionAC = new AbortController();
     const connectionSignal = connectionAC.signal;
@@ -37,8 +51,7 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
         ws.close();
         if (connecting) {
           connecting = false;
-          this.dispatchEvent(makeEvent('connectionfailure', detail));
-          reject(new Error(`handshake failed: ${detail.code} ${detail.reason}`));
+          reject(detail);
         } else {
           this._ws = null;
           this.dispatchEvent(makeEvent('disconnected', detail));
@@ -74,7 +87,14 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
       s.addEventListener('abort', () => handleClose(ABORT_DETAIL), { signal: connectionSignal });
 
       schedulePings(ws);
-    }).catch((e) => {
+    }).catch((e: unknown) => {
+      if (isDisconnectDetail(e)) {
+        this.dispatchEvent(makeEvent('connectionfailure', e));
+      } else {
+        this.dispatchEvent(
+          makeEvent('connectionfailure', { code: 0, reason: `unknown connection error ${e}` }),
+        );
+      }
       connectionAC.abort();
       throw e;
     });
@@ -140,6 +160,17 @@ export type ConnectionGetter = (signal: AbortSignal) => MaybePromise<ConnectionI
 export interface DisconnectDetail {
   code: number;
   reason: string;
+}
+
+function isDisconnectDetail(x: unknown): x is DisconnectDetail {
+  return Boolean(
+    x &&
+      typeof x === 'object' &&
+      'code' in x &&
+      'reason' in x &&
+      typeof x.code === 'number' &&
+      typeof x.reason === 'string',
+  );
 }
 
 const ERROR_DETAIL: DisconnectDetail = { code: 0, reason: 'client side error' };
