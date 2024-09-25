@@ -1,13 +1,13 @@
-import type { MaybePromise } from '../helpers/MaybePromise';
-import type { Scheduler } from './Scheduler';
+import { makeTimeout } from '../helpers/timeout';
+import type { ErrorHandler, Handler, Scheduler } from './Scheduler';
 
-type Handler = (signal: AbortSignal) => MaybePromise<void>;
 type DelayGetter = (attempt: number) => number;
 
 export class OnlineScheduler implements Scheduler {
   private _timeout: NodeJS.Timeout | null = null;
   private _stop: (() => void) | null = null;
   private _handler: Handler | null = null;
+  private _errorHandler: ErrorHandler = () => null;
   private _attempts = 0;
 
   public constructor(
@@ -17,13 +17,14 @@ export class OnlineScheduler implements Scheduler {
     this._attempt = this._attempt.bind(this);
   }
 
-  public trigger(handler: Handler) {
+  public trigger(handler: Handler, errorHandler: ErrorHandler) {
     this.stop();
     this._handler = handler;
+    this._errorHandler = errorHandler;
     this._attempt();
   }
 
-  public schedule(handler: Handler) {
+  public schedule(handler: Handler, errorHandler: ErrorHandler) {
     if (this._handler === handler) {
       return;
     }
@@ -31,6 +32,7 @@ export class OnlineScheduler implements Scheduler {
       this.stop();
     }
     this._handler = handler;
+    this._errorHandler = errorHandler;
     if (this._timeout !== null) {
       return;
     }
@@ -58,32 +60,31 @@ export class OnlineScheduler implements Scheduler {
     }
     this._remove();
     const ac = new AbortController();
-    let stopTimeout: () => void = () => null;
+    const timeout = makeTimeout(this._connectTimeLimit);
     this._stop = () => {
-      stopTimeout();
+      timeout.stop();
       ac.abort();
     };
     try {
-      await Promise.race([
-        this._handler(ac.signal),
-        new Promise((_, reject) => {
-          const connectTimeout = setTimeout(reject, this._connectTimeLimit);
-          stopTimeout = () => clearTimeout(connectTimeout);
-        }),
-      ]);
+      await Promise.race([this._handler(ac.signal), timeout.promise]);
       this._handler = null;
       this._attempts = 0;
-    } catch (_ignore) {
+    } catch (e) {
       if (!ac.signal.aborted) {
         ac.abort();
+        try {
+          this._errorHandler(e);
+        } catch (e2) {
+          console.error('Error handler failed', e, e2);
+        }
         const h = this._handler;
         if (h) {
           this._handler = null;
-          this.schedule(h);
+          this.schedule(h, this._errorHandler);
         }
       }
     } finally {
-      stopTimeout();
+      timeout.stop();
       this._stop = null;
     }
   }

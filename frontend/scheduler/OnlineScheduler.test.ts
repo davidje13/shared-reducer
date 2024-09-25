@@ -5,7 +5,7 @@ describe('OnlineScheduler', () => {
   it('invokes immediately when trigger is called', async () => {
     const scheduler = new OnlineScheduler(() => 1, 1000);
     const handler = mock().returning('result');
-    scheduler.trigger(handler);
+    scheduler.trigger(handler, (e) => fail(`error handler invoked with ${e}`));
 
     expect(handler).toHaveBeenCalled();
 
@@ -17,7 +17,7 @@ describe('OnlineScheduler', () => {
     const delayFn = mock().returning(10);
     const scheduler = new OnlineScheduler(delayFn, 1000);
     const handler = mock().throwing(new Error('nope'));
-    scheduler.trigger(handler);
+    scheduler.trigger(handler, () => null);
 
     expect(handler).toHaveBeenCalled({ times: 1 });
     await sleep(5);
@@ -39,7 +39,7 @@ describe('OnlineScheduler', () => {
   it('awaits the handler up to the configured limit', async () => {
     const scheduler = new OnlineScheduler(() => 10, 50);
     const handler = mock<(s: AbortSignal) => Promise<void>>().returning(new Promise(() => null));
-    scheduler.trigger(handler);
+    scheduler.trigger(handler, () => null);
 
     expect(handler).toHaveBeenCalled({ times: 1 });
     await sleep(40);

@@ -5,7 +5,7 @@ import type { Scheduler } from '../scheduler/Scheduler';
 type ReconnectingWebSocketEvents = {
   connected: CustomEvent<void>;
   disconnected: CustomEvent<DisconnectDetail>;
-  connectionfailure: CustomEvent<DisconnectDetail>;
+  connectionfailure: CustomEvent<Error>;
   message: CustomEvent<string>;
 };
 
@@ -19,22 +19,17 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
   ) {
     super();
     this._reconnect = this._reconnect.bind(this);
-    this._reconnectScheduler.trigger(this._reconnect);
+    this._handleError = this._handleError.bind(this);
+    this._reconnectScheduler.trigger(this._reconnect, this._handleError);
+  }
+
+  private _handleError(e: unknown) {
+    const err = e instanceof Error ? e : new Error(`unknown connection error ${e}`);
+    this.dispatchEvent(makeEvent('connectionfailure', err));
   }
 
   private async _reconnect(s: AbortSignal) {
-    let url: string;
-    let token: string | undefined;
-    try {
-      const c = await this._connectionGetter(s);
-      url = c.url;
-      token = c.token;
-    } catch (e) {
-      this.dispatchEvent(
-        makeEvent('connectionfailure', { code: 0, reason: `connection getter threw: ${e}` }),
-      );
-      throw e;
-    }
+    const { url, token } = await this._connectionGetter(s);
     if (s.aborted) {
       // AbortSignal.throwIfAborted is not currently supported in JSDOM
       throw s.reason;
@@ -51,12 +46,12 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
         ws.close();
         if (connecting) {
           connecting = false;
-          reject(detail);
+          reject(new Error(`Connection closed ${detail.code} ${detail.reason}`));
         } else {
           this._ws = null;
           this.dispatchEvent(makeEvent('disconnected', detail));
           if (!this._closed) {
-            this._reconnectScheduler.schedule(this._reconnect);
+            this._reconnectScheduler.schedule(this._reconnect, this._handleError);
           }
         }
       };
@@ -84,17 +79,19 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
 
       ws.addEventListener('close', handleClose, { signal: connectionSignal });
       ws.addEventListener('error', () => handleClose(ERROR_DETAIL), { signal: connectionSignal });
-      s.addEventListener('abort', () => handleClose(ABORT_DETAIL), { signal: connectionSignal });
+      s.addEventListener(
+        'abort',
+        () => () => {
+          connectionAC.abort();
+          ws.close();
+          connecting = false;
+          reject(s.reason);
+        },
+        { signal: connectionSignal },
+      );
 
       schedulePings(ws);
     }).catch((e: unknown) => {
-      if (isDisconnectDetail(e)) {
-        this.dispatchEvent(makeEvent('connectionfailure', e));
-      } else {
-        this.dispatchEvent(
-          makeEvent('connectionfailure', { code: 0, reason: `unknown connection error ${e}` }),
-        );
-      }
       connectionAC.abort();
       throw e;
     });
@@ -162,19 +159,7 @@ export interface DisconnectDetail {
   reason: string;
 }
 
-function isDisconnectDetail(x: unknown): x is DisconnectDetail {
-  return Boolean(
-    x &&
-      typeof x === 'object' &&
-      'code' in x &&
-      'reason' in x &&
-      typeof x.code === 'number' &&
-      typeof x.reason === 'string',
-  );
-}
-
 const ERROR_DETAIL: DisconnectDetail = { code: 0, reason: 'client side error' };
-const ABORT_DETAIL: DisconnectDetail = { code: 0, reason: 'handshake timeout' };
 
 const PING = 'P';
 const PONG = 'p';

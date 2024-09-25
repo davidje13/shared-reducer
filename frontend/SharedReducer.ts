@@ -208,10 +208,8 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this.dispatchEvent(makeEvent('connected'));
   };
 
-  private readonly _handleConnectionFailure = (e: CustomEvent<DisconnectDetail>) => {
-    this.dispatchEvent(
-      makeEvent('warning', new Error(`connection failure: ${e.detail.code} ${e.detail.reason}`)),
-    );
+  private readonly _handleConnectionFailure = (e: CustomEvent<Error>) => {
+    this.dispatchEvent(makeEvent('warning', e.detail));
   };
 
   private readonly _handleDisconnected = (e: CustomEvent<DisconnectDetail>) => {
