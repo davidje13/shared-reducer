@@ -46,16 +46,16 @@
   "homepage": "https://github.com/davidje13/shared-reducer#readme",
   "devDependencies": {
     "@rollup/plugin-terser": "0.4.x",
-    "@rollup/plugin-typescript": "11.x",
+    "@rollup/plugin-typescript": "12.x",
     "collection-storage": "3.x",
     "json-immutability-helper": "4.x",
     "lean-test": "2.x",
-    "prettier": "3.3.3",
+    "prettier": "3.4.2",
     "rollup": "4.x",
     "rollup-plugin-dts": "6.x",
     "superwstest": "2.x",
-    "tslib": "2.7.x",
-    "typescript": "5.6.x",
+    "tslib": "2.8.x",
+    "typescript": "5.7.x",
     "websocket-express": "3.x"
   }
 }
