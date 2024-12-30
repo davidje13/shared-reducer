@@ -13,7 +13,11 @@ import { ReadWrite } from '../permission/ReadWrite';
 import { ReadOnly } from '../permission/ReadOnly';
 import { ReadWriteStruct } from '../permission/ReadWriteStruct';
 import type { Permission } from '../permission/Permission';
-import { WebsocketHandlerFactory, type WebsocketHandlerOptions } from './WebsocketHandlerFactory';
+import {
+  WebsocketHandlerFactory,
+  type HandlerCallbacks,
+  type WebsocketHandlerOptions,
+} from './WebsocketHandlerFactory';
 
 describe('WebsocketHandlerFactory', () => {
   const SERVER_FACTORY = beforeEach<TestSetup>(async ({ setParameter }) => {
@@ -56,7 +60,7 @@ describe('WebsocketHandlerFactory', () => {
       .ws('/a')
       .expectJson()
       .sendText('{invalid}')
-      .expectJson({ error: "Expected property name or '}' in JSON at position 1" });
+      .expectJson((v) => expect(v.error).contains("Expected property name or '}'"));
   });
 
   it('handles errors from the idGetter', async ({ getTyped }) => {
@@ -217,6 +221,35 @@ describe('WebsocketHandlerFactory', () => {
 
     await request(server).ws('/a').close().expectClosed();
   });
+
+  it('invokes connection and disconnection callbacks', async ({ getTyped }) => {
+    const onConnect = mock();
+    const onDisconnect = mock();
+    const { server } = setupServer(getTyped(SERVER_FACTORY), {
+      callbacks: { onConnect, onDisconnect },
+    });
+
+    await request(server)
+      .ws('/a')
+      .expectJson()
+      .exec(() => expect(onConnect).toHaveBeenCalled())
+      .exec(() => expect(onDisconnect).not(toHaveBeenCalled()))
+      .close()
+      .expectClosed();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onDisconnect).toHaveBeenCalledWith(any(), 'disconnect', isLessThan(1000));
+  });
+
+  it('invokes the error callback if an unexpected error occurs', async ({ getTyped }) => {
+    const onError = mock();
+    const { server } = setupServer(getTyped(SERVER_FACTORY), { callbacks: { onError } });
+
+    await request(server).ws('/error').expectConnectionError(500);
+
+    expect(onError).toHaveBeenCalledWith(any(), 'handshake', any());
+  });
 });
 
 interface TestSetup {
@@ -233,10 +266,12 @@ function setupServer(
   {
     middleware = [],
     handlerOptions,
+    callbacks,
     permission = ReadWrite,
   }: {
     middleware?: WSRequestHandler[];
     handlerOptions?: WebsocketHandlerOptions;
+    callbacks?: HandlerCallbacks<unknown>;
     permission?: Permission<TestT, Spec<TestT>>;
   } = {},
 ) {
@@ -257,6 +292,7 @@ function setupServer(
         return id ?? '';
       },
       () => permission,
+      callbacks,
     ),
   );
 

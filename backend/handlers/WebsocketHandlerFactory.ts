@@ -29,6 +29,12 @@ export interface WebsocketHandlerOptions {
   pongTimeout?: number;
 }
 
+export interface HandlerCallbacks<Req> {
+  onConnect?: (req: Req) => void;
+  onDisconnect?: (req: Req, reason: string, connectionDuration: number) => void;
+  onError?: (req: Req, context: string, error: unknown) => void;
+}
+
 export class WebsocketHandlerFactory<T, SpecT> {
   private readonly closers = new Set<() => Promise<void>>();
   private readonly _pingInterval: number;
@@ -64,6 +70,7 @@ export class WebsocketHandlerFactory<T, SpecT> {
   public handler<Req, Res extends WSResponse>(
     idGetter: (req: Req, res: Res) => MaybePromise<string>,
     permissionGetter: (req: Req, res: Res) => MaybePromise<Permission<T, SpecT>>,
+    { onConnect, onDisconnect, onError = DEFAULT_ERROR_HANDLER }: HandlerCallbacks<Req> = {},
   ) {
     const handshake = async (req: Req, res: Res) => {
       const id = await idGetter(req, res);
@@ -81,8 +88,13 @@ export class WebsocketHandlerFactory<T, SpecT> {
         res.sendError(503, 1012);
         return;
       }
+      const tryReportError = (context: string, err: unknown) => {
+        try {
+          onError(req, context, err);
+        } catch {}
+      };
       const subscription = await handshake(req, res).catch((e) => {
-        console.warn('WebSocket init error', e);
+        tryReportError('handshake', e);
         res.sendError(500);
         return null;
       });
@@ -90,8 +102,20 @@ export class WebsocketHandlerFactory<T, SpecT> {
         return;
       }
 
+      const begin = Date.now();
+      const close = (reason: string) => {
+        const duration = Date.now() - begin;
+        try {
+          onDisconnect?.(req, reason, duration);
+        } catch (e) {
+          tryReportError('disconnect hook', e);
+        }
+        subscription.close().catch(() => null);
+      };
+
       try {
         const ws = await res.accept();
+        onConnect?.(req);
         let state = 0;
 
         let closed: () => void = () => null;
@@ -107,13 +131,13 @@ export class WebsocketHandlerFactory<T, SpecT> {
         ws.on('close', () => {
           state = 2;
           clearTimeout(pingTm);
-          subscription.close().catch(() => null);
+          close('disconnect');
           this.closers.delete(handleSoftClose);
           closed();
         });
 
         const connectionLost = () => {
-          subscription.close().catch(() => null);
+          close('lost');
           this.closers.delete(handleSoftClose);
           ws.terminate();
           closed();
@@ -174,7 +198,7 @@ export class WebsocketHandlerFactory<T, SpecT> {
 
         if (this.closing) {
           res.sendError(503, 1012);
-          subscription.close().catch(() => null);
+          close('server shutdown');
           return;
         }
         ws.send(JSON.stringify({ init: subscription.getInitialData() }));
@@ -185,10 +209,13 @@ export class WebsocketHandlerFactory<T, SpecT> {
         let pingTm = setTimeout(ping, this._pingInterval);
         this.closers.add(handleSoftClose);
       } catch (e) {
-        console.warn('WebSocket error', e);
+        tryReportError('communication', e);
         res.sendError(500);
-        subscription.close().catch(() => null);
+        close('error');
       }
     };
   }
 }
+
+const DEFAULT_ERROR_HANDLER = (_: unknown, context: string, error: unknown) =>
+  console.warn(`shared-reducer: ${context}`, error);
