@@ -10,7 +10,6 @@ rm -rf "$BASE_DIR/build" 2>/dev/null || true;
 
 cd "$BASE_DIR";
 npx rollup --config rollup.config.mjs;
-npx rollup --config rollup-dts.config.mjs;
 cd - >/dev/null;
 
 rm -rf "$BASE_DIR/build/types";
