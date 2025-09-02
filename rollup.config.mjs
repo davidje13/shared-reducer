@@ -22,6 +22,7 @@ export default [
     external: [/node:.*/],
     plugins: [
       typescript({
+        tslib: {},
         compilerOptions: {
           noEmit: false,
           declaration: true,
