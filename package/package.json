@@ -5,11 +5,11 @@
     "test": "node commonjs.js && node es6modules.mjs && tsc --project tsconfig.json"
   },
   "devDependencies": {
-    "@types/express": "4.x",
+    "@types/express": "5.x",
     "@types/react": "18.x",
     "json-immutability-helper": "4.x",
     "shared-reducer": "file:shared-reducer.tgz",
-    "typescript": "5.6.x",
-    "websocket-express": "3.x"
+    "typescript": "5.9.x",
+    "websocket-express": "4.x"
   }
 }
