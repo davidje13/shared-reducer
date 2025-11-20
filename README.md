@@ -15,8 +15,53 @@ npm install --save shared-reducer json-immutability-helper
 
 ## Usage (Backend)
 
-This project is compatible with [websocket-express](https://github.com/davidje13/websocket-express),
-but can also be used in isolation.
+This project is compatible with [web-listener](https://github.com/davidje13/web-listener) and
+[websocket-express](https://github.com/davidje13/websocket-express), but can also be used in
+isolation.
+
+### With web-listener
+
+```javascript
+import {
+  Broadcaster,
+  WebsocketHandlerFactory,
+  InMemoryModel,
+  ReadWrite,
+} from 'shared-reducer/backend';
+import context from 'json-immutability-helper';
+import { WebListener, Router, makeAcceptWebSocket, setSoftCloseHandler } from 'web-listener';
+import { WebSocketServer } from 'ws';
+
+const model = new InMemoryModel();
+const broadcaster = new Broadcaster(model, context);
+model.set('a', { foo: 'v1' });
+
+const acceptWebSocket = makeAcceptWebSocket(WebSocketServer);
+const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+
+const router = new Router();
+router.ws(
+  '/:id',
+  handlerFactory.handler({
+    accessGetter: (req) => ({
+      id: getPathParameter(req, 'id'),
+      permission: ReadWrite,
+    }),
+    acceptWebSocket,
+    setSoftCloseHandler,
+  }),
+);
+
+const server = new WebListener(router).listen(0, 'localhost');
+
+// later, to shutdown gracefully:
+// send a close signal to all clients and wait up to 1 second for acknowledgement:
+await server.closeWithTimeout('shutdown', 1000);
+```
+
+For real use-cases, you will probably want to add authentication middleware to the router chain,
+and you may want to give some users read-only and others read-write access, which can be achieved in
+the `accessGetter` lambda.
 
 ### With websocket-express
 
@@ -34,23 +79,35 @@ const model = new InMemoryModel();
 const broadcaster = new Broadcaster(model, context);
 model.set('a', { foo: 'v1' });
 
+const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+const softClosers = new Map();
+
 const app = new WebSocketExpress();
+app.ws(
+  '/:id',
+  handlerFactory.handler({
+    accessGetter: (req) => ({ id: req.params.id, permission: ReadWrite }),
+    acceptWebSocket: (_, res) => res.accept(),
+    setSoftCloseHandler: (req, fn) => softClosers.set(req, fn),
+    onDisconnect: (req) => softClosers.delete(req),
+  }),
+);
+
 const server = app.listen(0, 'localhost');
 
-const handlerFactory = new WebsocketHandlerFactory(broadcaster);
-app.ws('/:id', handlerFactory.handler((req) => req.params.id, () => ReadWrite));
-
-const server = app.listen();
-
 // later, to shutdown gracefully:
-// send a close signal to all clients and wait up to 1 second for acknowledgement:
-await handlerFactory.close(1000);
-server.close();
+server.close(); // stop accepting new connections
+// send a close signal to all active clients:
+for (const fn of softClosers.values()) {
+  fn();
+}
+// force-close connections after a time:
+setTimeout(() => server.closeAllConnections(), 1000);
 ```
 
 For real use-cases, you will probably want to add authentication middleware to the expressjs chain,
 and you may want to give some users read-only and others read-write access, which can be achieved in
-the second lambda.
+the `accessGetter` lambda.
 
 ### Alone
 
@@ -67,7 +124,9 @@ model.set('a', { foo: 'v1' });
 const subscription = await broadcaster.subscribe('a');
 
 const begin = subscription.getInitialData();
-subscription.listen((change, meta) => { /*...*/ });
+subscription.listen((change, meta) => {
+  // ...
+});
 await subscription.send(['=', { foo: 'v2' }]);
 // callback provided earlier is invoked
 
@@ -128,9 +187,7 @@ reducer.addEventListener('warning', (e) => {
 
 const dispatch = reducer.dispatch;
 
-dispatch([
-  { a: ['=', 8] },
-]);
+dispatch([{ a: ['=', 8] }]);
 
 dispatch([
   (state) => {
@@ -151,10 +208,7 @@ dispatch(
   (message) => console.warn('failed to sync', message),
 );
 
-dispatch([
-  { a: ['add', 1] },
-  { a: ['add', 1] },
-]);
+dispatch([{ a: ['add', 1] }, { a: ['add', 1] }]);
 ```
 
 ### Specs
@@ -226,10 +280,7 @@ import listCommands from 'json-immutability-helper/commands/list';
 import mathCommands from 'json-immutability-helper/commands/math';
 import context from 'json-immutability-helper';
 
-const broadcaster = new Broadcaster(
-  new InMemoryModel(),
-  context.with(listCommands, mathCommands),
-);
+const broadcaster = new Broadcaster(new InMemoryModel(), context.with(listCommands, mathCommands));
 ```
 
 ```javascript
@@ -239,10 +290,9 @@ import listCommands from 'json-immutability-helper/commands/list';
 import mathCommands from 'json-immutability-helper/commands/math';
 import context from 'json-immutability-helper';
 
-const reducer = new SharedReducer(
-  context.with(listCommands, mathCommands),
-  () => ({ url: 'ws://destination' }),
-);
+const reducer = new SharedReducer(context.with(listCommands, mathCommands), () => ({
+  url: 'ws://destination',
+}));
 ```
 
 If you want to use an entirely different reducer, create a wrapper:
@@ -281,7 +331,7 @@ new Broadcaster(model, reducer[, options]);
 ```
 
 - `options.subscribers`: specify a custom keyed broadcaster, used for communicating changes to all
-consumers. Required interface:
+  consumers. Required interface:
 
   ```javascript
   {

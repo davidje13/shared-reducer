@@ -1,10 +1,20 @@
-import type { Server } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import context, { type Spec } from 'json-immutability-helper';
-import type { Request } from 'express';
-import { WebSocketExpress, type Router, type WSRequestHandler } from 'websocket-express';
 import request from 'superwstest';
+import {
+  getPathParameter,
+  makeAcceptWebSocket,
+  makeWebSocketFallbackTokenFetcher,
+  requireBearerAuth,
+  Router,
+  setSoftCloseHandler,
+  WebListener,
+  type AugmentedServer,
+  type UpgradeHandler,
+  type WithPathParameters,
+} from 'web-listener';
+import { WebSocketServer } from 'ws';
 import { Sentinel } from '../../test-helpers/Sentinel';
-import { runLocalServer, closeServer } from '../../test-helpers/serverRunner';
 import { BreakableTcpProxy } from '../../test-helpers/BreakableTcpProxy';
 import { sleep } from '../../test-helpers/sleep';
 import { InMemoryModel } from '../model/InMemoryModel';
@@ -13,20 +23,18 @@ import { ReadWrite } from '../permission/ReadWrite';
 import { ReadOnly } from '../permission/ReadOnly';
 import { ReadWriteStruct } from '../permission/ReadWriteStruct';
 import type { Permission } from '../permission/Permission';
-import {
-  WebsocketHandlerFactory,
-  type HandlerCallbacks,
-  type WebsocketHandlerOptions,
-} from './WebsocketHandlerFactory';
+import { WebsocketHandlerFactory, type WebsocketHandlerOptions } from './WebsocketHandlerFactory';
+
+const acceptWebSocket = makeAcceptWebSocket(WebSocketServer);
 
 describe('WebsocketHandlerFactory', () => {
   const SERVER_FACTORY = beforeEach<TestSetup>(async ({ setParameter }) => {
-    const app = new WebSocketExpress();
-    const server = await runLocalServer(app);
+    const router = new Router();
+    const server = await new WebListener(router).listen(0, 'localhost');
 
-    setParameter({ app, server });
+    setParameter({ router, server });
 
-    return () => closeServer(server);
+    return () => server.closeWithTimeout('end of test', 0);
   });
 
   it('creates a websocket-express compatible handler', async ({ getTyped }) => {
@@ -60,7 +68,7 @@ describe('WebsocketHandlerFactory', () => {
       .ws('/a')
       .expectJson()
       .sendText('{invalid}')
-      .expectJson((v) => expect(v.error).contains("Expected property name or '}'"));
+      .expectJson((v) => expect(v.error).equals('Invalid JSON'));
   });
 
   it('handles errors from the idGetter', async ({ getTyped }) => {
@@ -137,14 +145,14 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('sends close message when softClose is called', async ({ getTyped }) => {
-    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
     const complete = new Sentinel();
 
     await request(server)
       .ws('/a')
       .expectJson()
       .exec(() => {
-        handlerFactory.softClose(5000).then(complete.resolve);
+        server.closeWithTimeout('shutdown', 5000).then(complete.resolve);
       })
       .expectText('X')
       .wait(50)
@@ -154,14 +162,14 @@ describe('WebsocketHandlerFactory', () => {
   });
 
   it('times out if client takes too long to respond to a close signal', async ({ getTyped }) => {
-    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
     const complete = new Sentinel();
 
     await request(server)
       .ws('/a')
       .expectJson()
       .exec(() => {
-        handlerFactory.softClose(50).then(complete.resolve);
+        server.closeWithTimeout('shutdown', 50).then(complete.resolve);
       })
       .expectText('X');
 
@@ -170,29 +178,25 @@ describe('WebsocketHandlerFactory', () => {
     expect(Date.now() - tm0).isLessThan(200);
   });
 
-  it('does not accept new connections after softClose is called', async ({ getTyped }) => {
-    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY));
-
-    handlerFactory.softClose(5000);
-
-    await request(server).ws('/a').expectConnectionError(503);
-  });
-
   it('times out if client takes too long to respond to a ping', async ({ getTyped }) => {
-    const { server, handlerFactory } = setupServer(getTyped(SERVER_FACTORY), {
+    const { server } = setupServer(getTyped(SERVER_FACTORY), {
       handlerOptions: { pingInterval: 100, pongTimeout: 100 },
     });
+    const countConnections = () =>
+      new Promise((resolve, reject) =>
+        server.getConnections((error, n) => (error ? reject(error) : resolve(n))),
+      );
     const proxy = new BreakableTcpProxy(server.address());
     await proxy.listen(0, 'localhost');
     try {
       await request(proxy.server).ws('/a').expectJson();
 
-      expect(handlerFactory.activeConnections()).toEqual(1);
+      expect(await countConnections()).toEqual(1);
       proxy.pullWire();
       await sleep(80);
-      expect(handlerFactory.activeConnections()).toEqual(1);
+      expect(await countConnections()).toEqual(1);
       await sleep(150);
-      expect(handlerFactory.activeConnections()).toEqual(0);
+      expect(await countConnections()).toEqual(0);
     } finally {
       proxy.close();
     }
@@ -226,7 +230,7 @@ describe('WebsocketHandlerFactory', () => {
     const onConnect = mock();
     const onDisconnect = mock();
     const { server } = setupServer(getTyped(SERVER_FACTORY), {
-      callbacks: { onConnect, onDisconnect },
+      handlerOptions: { onConnect, onDisconnect },
     });
 
     await request(server)
@@ -239,22 +243,13 @@ describe('WebsocketHandlerFactory', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(onDisconnect).toHaveBeenCalledWith(any(), 'disconnect', isLessThan(1000));
-  });
-
-  it('invokes the error callback if an unexpected error occurs', async ({ getTyped }) => {
-    const onError = mock();
-    const { server } = setupServer(getTyped(SERVER_FACTORY), { callbacks: { onError } });
-
-    await request(server).ws('/error').expectConnectionError(500);
-
-    expect(onError).toHaveBeenCalledWith(any(), 'handshake', any());
+    expect(onDisconnect).toHaveBeenCalledWith(any(), 'client disconnect', isLessThan(1000));
   });
 });
 
 interface TestSetup {
-  app: Router;
-  server: Server;
+  router: Router;
+  server: AugmentedServer;
 }
 
 interface TestT {
@@ -266,12 +261,12 @@ function setupServer(
   {
     middleware = [],
     handlerOptions,
-    callbacks,
     permission = ReadWrite,
   }: {
-    middleware?: WSRequestHandler[];
-    handlerOptions?: WebsocketHandlerOptions;
-    callbacks?: HandlerCallbacks<unknown>;
+    middleware?: UpgradeHandler[];
+    handlerOptions?: Partial<
+      WebsocketHandlerOptions<IncomingMessage & WithPathParameters<{ id: string }>>
+    >;
     permission?: Permission<TestT, Spec<TestT>>;
   } = {},
 ) {
@@ -279,36 +274,38 @@ function setupServer(
   model.set('a', { foo: 'v1' });
 
   const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
-  const handlerFactory = new WebsocketHandlerFactory(broadcaster, handlerOptions);
-  setup.app.ws(
+  const handlerFactory = new WebsocketHandlerFactory(broadcaster);
+  setup.router.ws(
     '/:id',
     ...middleware,
-    handlerFactory.handler(
-      (req: Request) => {
-        const id = req.params['id'];
+    handlerFactory.handler({
+      accessGetter: (req) => {
+        const id = getPathParameter(req, 'id');
         if (id === 'error') {
           throw new Error('oops');
         }
-        return id ?? '';
+        return { id, permission };
       },
-      () => permission,
-      callbacks,
-    ),
+      acceptWebSocket,
+      setSoftCloseHandler,
+      ...handlerOptions,
+    }),
   );
 
-  return { server: setup.server, handlerFactory };
+  return { server: setup.server };
 }
 
 function mockAuth() {
   const r = {
     capturedToken: '',
-    middleware: WebSocketExpress.requireBearerAuth(
-      () => '',
-      (token) => {
+    middleware: requireBearerAuth({
+      realm: () => '',
+      extractAndValidateToken: (token) => {
         r.capturedToken = token;
         return {};
       },
-    ),
+      fallbackTokenFetcher: makeWebSocketFallbackTokenFetcher(acceptWebSocket),
+    }).handler,
   };
   return r;
 }

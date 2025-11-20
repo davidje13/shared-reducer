@@ -1,6 +1,16 @@
+import type { IncomingMessage } from 'node:http';
 import context, { type Spec } from 'json-immutability-helper';
-import { Request } from 'express';
 import { WebSocketExpress } from 'websocket-express';
+import {
+  emitError,
+  getPathParameter,
+  HTTPError,
+  makeAcceptWebSocket,
+  Router,
+  setSoftCloseHandler,
+  type WithPathParameters,
+} from 'web-listener';
+import { WebSocketServer } from 'ws';
 import {
   Broadcaster,
   WebsocketHandlerFactory,
@@ -22,19 +32,40 @@ interface Type {
   //@ts-expect-error
   broadcaster.update('a', { foo: ['=', 0] });
 
-  const app = new WebSocketExpress();
-
   const handlerFactory = new WebsocketHandlerFactory(broadcaster);
-  app.ws(
+
+  new WebSocketExpress().ws(
     '/:id',
-    handlerFactory.handler(
-      (req: Request) => req.params.id,
-      () => ReadWrite,
-    ),
+    handlerFactory.handler({
+      accessGetter: (req) => ({ id: req.params.id, permission: ReadWrite }),
+      acceptWebSocket: (_, res) => res.accept(),
+    }),
   );
 
-  const server = app.listen(0, 'localhost');
-  server.close();
+  const acceptWebSocket = makeAcceptWebSocket(WebSocketServer);
+  new Router().ws(
+    '/:id',
+    handlerFactory.handler({
+      accessGetter: (req) => {
+        assertType(req)<IncomingMessage & WithPathParameters<{ id: string }>>();
+        return { id: getPathParameter(req, 'id'), permission: ReadWrite };
+      },
+      acceptWebSocket,
+      setSoftCloseHandler,
+      notFoundError: new HTTPError(404),
+      pingInterval: 10000,
+      pongTimeout: 15000,
+      onConnect: (req) => {
+        assertType(req)<IncomingMessage & WithPathParameters<{ id: string }>>();
+      },
+      onDisconnect: (req, reason, duration) => {
+        assertType(req)<IncomingMessage & WithPathParameters<{ id: string }>>();
+        assertType(reason)<string>();
+        assertType(duration)<number>();
+      },
+      onError: emitError,
+    }),
+  );
 
   const subscription = await broadcaster.subscribe<number>('a');
 
@@ -57,6 +88,11 @@ interface Type {
 
     await subscription.close();
   }
-
-  handlerFactory.softClose(100).then(() => null);
 })();
+
+// assertion helper
+type Equals<A, B> =
+  (<G>() => G extends A ? 1 : 2) extends <G>() => G extends B ? 1 : 2 ? [] : ['nope'];
+const assertType =
+  <Actual>(_: Actual) =>
+  <Expected>(..._typesDoNotMatch: Equals<Actual, Expected>) => {};

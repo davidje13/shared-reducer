@@ -10,6 +10,7 @@
     "json-immutability-helper": "4.x",
     "shared-reducer": "file:shared-reducer.tgz",
     "typescript": "5.9.x",
+    "web-listener": "0.10.0",
     "websocket-express": "4.x"
   }
 }

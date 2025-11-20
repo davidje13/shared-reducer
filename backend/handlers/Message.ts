@@ -3,17 +3,23 @@ export interface Message {
   id?: number;
 }
 
+export class MessageParseError extends Error {}
+
 export function unpackMessage(msg: string): Message {
-  const rawData = JSON.parse(msg);
-  if (typeof rawData !== 'object' || !rawData || Array.isArray(rawData)) {
-    throw new Error('Must specify change and optional id');
+  let rawData: unknown;
+  try {
+    rawData = JSON.parse(msg);
+  } catch {
+    throw new MessageParseError('Invalid JSON');
   }
-  const { id, change } = rawData;
-  if (id === undefined) {
-    return { change };
+  if (typeof rawData !== 'object' || !rawData || Array.isArray(rawData) || !('change' in rawData)) {
+    throw new MessageParseError('Must specify change and optional id');
   }
-  if (typeof id !== 'number') {
-    throw new Error('if specified, id must be a number');
+  if ('id' in rawData) {
+    if (typeof rawData.id !== 'number') {
+      throw new MessageParseError('If specified, id must be a number');
+    }
+    return { change: rawData.change, id: rawData.id };
   }
-  return { change, id };
+  return { change: rawData.change };
 }

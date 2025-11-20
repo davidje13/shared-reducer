@@ -1,7 +1,7 @@
-import { unpackMessage } from './Message';
 import type { Broadcaster } from '../Broadcaster';
-import type { Permission } from '../permission/Permission';
+import { PermissionError, type Permission } from '../permission/Permission';
 import type { MaybePromise } from '../helpers/MaybePromise';
+import { MessageParseError, unpackMessage } from './Message';
 
 export const PING = 'P';
 export const PONG = 'p';
@@ -14,208 +14,177 @@ interface ServerWebSocket {
   on(event: 'pong', listener: () => void): void;
   ping(): void;
   send(message: string): void;
+  close(): void;
   terminate(): void;
 }
 
-interface WSResponse {
-  accept(): Promise<ServerWebSocket>;
-  sendError(httpStatus: number, wsStatus?: number): void;
-  beginTransaction(): void;
-  endTransaction(): void;
+interface Access<T, SpecT> {
+  id: string;
+  permission: Permission<T, SpecT>;
 }
 
-export interface WebsocketHandlerOptions {
+type First<T extends any[]> = T extends [infer F, ...any[]] ? F : never;
+
+interface WebsocketHandlerCoreOptions<AccessGetter, AcceptWebSocket> {
+  accessGetter: AccessGetter;
+  acceptWebSocket: AcceptWebSocket;
+}
+
+export interface WebsocketHandlerOptions<Arg0> {
   pingInterval?: number;
   pongTimeout?: number;
-}
-
-export interface HandlerCallbacks<Req> {
-  onConnect?: (req: Req) => void;
-  onDisconnect?: (req: Req, reason: string, connectionDuration: number) => void;
-  onError?: (req: Req, context: string, error: unknown) => void;
+  notFoundError?: Error;
+  setSoftCloseHandler?: (arg0: Arg0, handler: () => Promise<void>) => void;
+  onConnect?: (arg0: Arg0) => void;
+  onDisconnect?: (arg0: Arg0, reason: string, connectionDuration: number) => void;
+  onError?: (arg0: Arg0, error: unknown, context: string) => void;
 }
 
 export class WebsocketHandlerFactory<T, SpecT> {
-  private readonly closers = new Set<() => Promise<void>>();
-  private readonly _pingInterval: number;
-  private readonly _pongTimeout: number;
-  private closing = false;
+  constructor(private readonly broadcaster: Broadcaster<T, SpecT>) {}
 
-  constructor(
-    private readonly broadcaster: Broadcaster<T, SpecT>,
-    options: WebsocketHandlerOptions = {},
-  ) {
-    this._pingInterval = options.pingInterval ?? 25_000;
-    this._pongTimeout = options.pongTimeout ?? 30_000;
-  }
-
-  public activeConnections() {
-    return this.closers.size;
-  }
-
-  public async softClose(timeout: number) {
-    this.closing = true;
-    let tm: NodeJS.Timeout | null = null;
-    await Promise.race([
-      Promise.all([...this.closers].map((c) => c())),
-      new Promise((resolve) => {
-        tm = setTimeout(resolve, timeout);
-      }),
-    ]);
-    if (tm !== null) {
-      clearTimeout(tm);
-    }
-  }
-
-  public handler<Req, Res extends WSResponse>(
-    idGetter: (req: Req, res: Res) => MaybePromise<string>,
-    permissionGetter: (req: Req, res: Res) => MaybePromise<Permission<T, SpecT>>,
-    { onConnect, onDisconnect, onError = DEFAULT_ERROR_HANDLER }: HandlerCallbacks<Req> = {},
-  ) {
-    const handshake = async (req: Req, res: Res) => {
-      const id = await idGetter(req, res);
-      const permission = await permissionGetter(req, res);
-      const subscription = await this.broadcaster.subscribe<number>(id, permission);
-      if (!subscription) {
-        res.sendError(404);
-        return null;
-      }
-      return subscription;
-    };
-
-    return async (req: Req, res: Res) => {
-      if (this.closing) {
-        res.sendError(503, 1012);
-        return;
-      }
-      const tryReportError = (context: string, err: unknown) => {
-        try {
-          onError(req, context, err);
-        } catch {}
-      };
-      const subscription = await handshake(req, res).catch((e) => {
-        tryReportError('handshake', e);
-        res.sendError(500);
-        return null;
-      });
-      if (!subscription) {
-        return;
-      }
-
-      const begin = Date.now();
-      const close = (reason: string) => {
-        const duration = Date.now() - begin;
-        try {
-          onDisconnect?.(req, reason, duration);
-        } catch (e) {
-          tryReportError('disconnect hook', e);
-        }
-        subscription.close().catch(() => null);
-      };
-
+  public handler<
+    Args extends any[],
+    AccessGetter extends (...args: Args) => MaybePromise<Access<T, SpecT>>,
+    AcceptWebSocket extends (...args: Args) => MaybePromise<ServerWebSocket>,
+  >({
+    accessGetter,
+    acceptWebSocket,
+    pingInterval = 25_000,
+    pongTimeout = 30_000,
+    notFoundError = NOT_FOUND_ERROR,
+    setSoftCloseHandler,
+    onConnect,
+    onDisconnect,
+    onError = DEFAULT_ERROR_HANDLER,
+  }: WebsocketHandlerCoreOptions<AccessGetter, AcceptWebSocket> &
+    WebsocketHandlerOptions<First<Args>>) {
+    return async (...args: Args) => {
+      const teardowns: (() => MaybePromise<void>)[] = [];
+      let pingTm: NodeJS.Timeout | undefined;
       try {
-        const ws = await res.accept();
-        onConnect?.(req);
-        let state = 0;
+        const { id, permission } = await accessGetter(...args);
+        const subscription = await this.broadcaster.subscribe<number>(id, permission);
+        if (!subscription) {
+          throw notFoundError;
+        }
+        teardowns.push(() => subscription.close());
 
-        let closed: () => void = () => null;
-        const handleSoftClose = () => {
-          this.closers.delete(handleSoftClose);
-          ws.send(CLOSE);
-          state = 1;
-          return new Promise<void>((resolve) => {
-            closed = resolve;
-          });
-        };
+        let state = STATE_CONNECTED;
+        let closeReason = 'connection failed';
+        let closed: (reason: string) => void;
+        const closePromise = new Promise<void>((resolve) => {
+          closed = (reason) => {
+            closed = () => {};
+            closeReason = reason;
+            resolve();
+          };
+        });
+
+        const ws = await acceptWebSocket(...args);
+        args.length = 1; // GC
+        setSoftCloseHandler?.(args[0], () => {
+          if (state === STATE_CONNECTED) {
+            state = STATE_SOFT_CLOSING;
+            ws.send(CLOSE);
+            if (!pingTm) {
+              pingTm = setTimeout(connectionLost, pongTimeout);
+            }
+          }
+          return closePromise;
+        });
+        const begin = Date.now();
+        onConnect?.(args[0]);
+        teardowns.push(() => onDisconnect?.(args[0], closeReason, Date.now() - begin));
 
         ws.on('close', () => {
-          state = 2;
           clearTimeout(pingTm);
-          close('disconnect');
-          this.closers.delete(handleSoftClose);
-          closed();
+          state = STATE_CLOSED;
+          closed('client disconnect');
         });
 
         const connectionLost = () => {
-          close('lost');
-          this.closers.delete(handleSoftClose);
           ws.terminate();
-          closed();
+          state = STATE_LOST;
+          closed('connection lost');
         };
 
         const ping = () => {
           ws.ping();
           clearTimeout(pingTm);
-          pingTm = setTimeout(connectionLost, this._pongTimeout);
+          pingTm = setTimeout(connectionLost, pongTimeout);
         };
 
-        ws.on('pong', () => {
+        const resetPing = () => {
           clearTimeout(pingTm);
-          pingTm = setTimeout(ping, this._pingInterval);
-        });
+          pingTm = setTimeout(ping, pingInterval);
+        };
+
+        ws.on('pong', resetPing);
 
         ws.on('message', async (data, isBinary) => {
-          clearTimeout(pingTm);
-          pingTm = setTimeout(ping, this._pingInterval);
+          resetPing();
+          if (isBinary) {
+            return ws.send(JSON.stringify({ error: 'Binary messages are not supported' }));
+          }
+
+          const msg = String(data);
+          if (msg === PING) {
+            return ws.send(PONG);
+          }
+          if (msg === CLOSE_ACK) {
+            if (state !== STATE_SOFT_CLOSING && state !== STATE_LOST) {
+              return ws.send(JSON.stringify({ error: 'Unexpected close ack message' }));
+            }
+            state = STATE_CLOSED;
+            closed('clean shutdown');
+            return ws.close();
+          }
+          if (state === STATE_CLOSED) {
+            return ws.send(JSON.stringify({ error: 'Unexpected message after close ack' }));
+          }
+
           try {
-            if (isBinary) {
-              throw new Error('Binary messages are not supported');
-            }
-
-            const msg = String(data);
-            if (msg === PING) {
-              ws.send(PONG);
-              return;
-            }
-            if (msg === CLOSE_ACK) {
-              if (state !== 1) {
-                throw new Error('Unexpected close ack message');
-              }
-              state = 2;
-              closed();
-              return;
-            }
-            if (state === 2) {
-              throw new Error('Unexpected message after close ack');
-            }
-
             const request = unpackMessage(msg);
-
-            res.beginTransaction();
-            try {
-              await subscription.send(request.change as SpecT, request.id);
-            } finally {
-              res.endTransaction();
+            await subscription.send(request.change as SpecT, request.id);
+          } catch (error) {
+            if (error instanceof PermissionError || error instanceof MessageParseError) {
+              ws.send(JSON.stringify({ error: error.message }));
+            } else {
+              onError(args[0], error, 'message');
+              ws.send(JSON.stringify({ error: 'Internal error' }));
             }
-          } catch (e) {
-            ws.send(
-              JSON.stringify({
-                error: e instanceof Error ? e.message : 'Internal error',
-              }),
-            );
           }
         });
 
-        if (this.closing) {
-          res.sendError(503, 1012);
-          close('server shutdown');
-          return;
+        if (state === STATE_CONNECTED) {
+          ws.send(JSON.stringify({ init: subscription.getInitialData() }));
+          subscription.listen((msg, id) =>
+            ws.send(JSON.stringify(id !== undefined ? { id, ...msg } : msg)),
+          );
+          resetPing();
         }
-        ws.send(JSON.stringify({ init: subscription.getInitialData() }));
-        subscription.listen((msg, id) => {
-          const data = id !== undefined ? { id, ...msg } : msg;
-          ws.send(JSON.stringify(data));
-        });
-        let pingTm = setTimeout(ping, this._pingInterval);
-        this.closers.add(handleSoftClose);
-      } catch (e) {
-        tryReportError('communication', e);
-        res.sendError(500);
-        close('error');
+        await closePromise;
+      } finally {
+        clearTimeout(pingTm);
+        for (const fn of teardowns.reverse()) {
+          try {
+            await fn();
+          } catch (error) {
+            onError(args[0], error, 'teardown');
+          }
+        }
       }
     };
   }
 }
 
-const DEFAULT_ERROR_HANDLER = (_: unknown, context: string, error: unknown) =>
+const STATE_CONNECTED = 0;
+const STATE_SOFT_CLOSING = 1;
+const STATE_CLOSED = 2;
+const STATE_LOST = 3;
+
+const NOT_FOUND_ERROR = new Error('not found');
+
+const DEFAULT_ERROR_HANDLER = (_: unknown, error: unknown, context: string) =>
   console.warn(`shared-reducer: ${context}`, error);

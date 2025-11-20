@@ -1,11 +1,19 @@
 import type { Server } from 'node:net';
 import context, { type Spec } from 'json-immutability-helper';
-import type { Application, Request } from 'express';
-import { WebSocketExpress } from 'websocket-express';
-import { WebSocket } from 'ws';
+import {
+  getAddressURL,
+  getPathParameter,
+  makeAcceptWebSocket,
+  makeWebSocketFallbackTokenFetcher,
+  requireBearerAuth,
+  Router,
+  setSoftCloseHandler,
+  WebListener,
+  type AugmentedServer,
+} from 'web-listener';
+import { WebSocket, WebSocketServer } from 'ws';
 import 'lean-test';
 
-import { closeServer, runLocalServer, getAddress } from '../test-helpers/serverRunner';
 import { BreakableTcpProxy } from '../test-helpers/BreakableTcpProxy';
 import { sleep } from '../test-helpers/sleep';
 import { Sentinel } from '../test-helpers/Sentinel';
@@ -33,6 +41,8 @@ if (!globalThis.WebSocket) {
   globalThis.WebSocket = WebSocket as typeof globalThis.WebSocket;
 }
 
+const acceptWebSocket = makeAcceptWebSocket(WebSocketServer);
+
 describe('e2e', () => {
   describe('one client', () => {
     it('sends initial state from server to client', async ({ getTyped }) => {
@@ -49,22 +59,25 @@ describe('e2e', () => {
       const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
       const handlerFactory = new WebsocketHandlerFactory(broadcaster);
       let capturedToken = '';
-      const app = new WebSocketExpress();
-      app.ws(
+      const router = new Router();
+      const auth = requireBearerAuth({
+        realm: () => '',
+        extractAndValidateToken: (token) => {
+          capturedToken = token;
+          return {};
+        },
+        fallbackTokenFetcher: makeWebSocketFallbackTokenFetcher(acceptWebSocket),
+      });
+      router.ws(
         '/:id',
-        WebSocketExpress.requireBearerAuth(
-          () => '',
-          (token) => {
-            capturedToken = token;
-            return {};
-          },
-        ),
-        handlerFactory.handler(
-          (req: Request) => req.params['id'] ?? '',
-          () => ReadWrite,
-        ),
+        auth.handler,
+        handlerFactory.handler({
+          accessGetter: (req) => ({ id: getPathParameter(req, 'id'), permission: ReadWrite }),
+          acceptWebSocket,
+          setSoftCloseHandler,
+        }),
       );
-      const server = await runner.runServer(app);
+      const server = await runner.runServer(new WebListener(router));
 
       const reducer = runner.getReducer<TestT>(server, '/a', { token: 'my-token' });
 
@@ -312,8 +325,7 @@ describe('e2e', () => {
     });
 
     it('pauses sending after a graceful shutdown message', async ({ getTyped }) => {
-      const { broadcaster, server, handlerFactory, getReducer } =
-        await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const { broadcaster, server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
 
       const reducer = getReducer<TestT>(server, '/a');
       await reducer.dispatch.sync();
@@ -321,7 +333,7 @@ describe('e2e', () => {
       await sleep(0); // wait for client to send message
       expect(await peekState(broadcaster, 'a')).not(toEqual('while closing'));
 
-      const closePromise = handlerFactory.softClose(1000);
+      const closePromise = server.closeWithTimeout('shutdown', 1000);
       expect(await clientPromise).toEqual({ foo: 'while closing', bar: 10 });
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while closing', bar: 10 });
       await closePromise;
@@ -384,11 +396,11 @@ describe('e2e', () => {
   const RUNNER = beforeEach<Runner>(({ setParameter }) => {
     const reducers: SharedReducer<any, any>[] = [];
     const proxies: BreakableTcpProxy[] = [];
-    const servers: Server[] = [];
+    const servers: AugmentedServer[] = [];
 
     const runner: Runner = {
-      runServer: async (app: Application) => {
-        const server = await runLocalServer(app);
+      runServer: async (listener: WebListener) => {
+        const server = await listener.listen(0, 'localhost');
         servers.push(server);
         return server;
       },
@@ -407,7 +419,7 @@ describe('e2e', () => {
           ...options
         }: SharedReducerOptions<T, Spec<T>> & ReducerOptions = {},
       ) => {
-        const host = getAddress(server, 'ws');
+        const host = getAddressURL(server.address(), 'ws');
         const reducer = new SharedReducer<T, Spec<T>>(
           context,
           () => ({ url: host + path, token }),
@@ -423,17 +435,18 @@ describe('e2e', () => {
         model.set('a', initialState);
         const broadcaster = new Broadcaster<T, Spec<T>>(model, context);
         const handlerFactory = new WebsocketHandlerFactory(broadcaster);
-        const app = new WebSocketExpress();
-        app.ws(
+        const router = new Router();
+        router.ws(
           '/:id',
-          handlerFactory.handler(
-            (req: Request) => req.params['id'] ?? '',
-            () => permission,
-          ),
+          handlerFactory.handler({
+            accessGetter: (req) => ({ id: getPathParameter(req, 'id'), permission }),
+            acceptWebSocket,
+            setSoftCloseHandler,
+          }),
         );
-        const server = await runner.runServer(app);
+        const server = await runner.runServer(new WebListener(router));
 
-        return { ...runner, broadcaster, handlerFactory, server };
+        return { ...runner, broadcaster, server };
       },
     };
 
@@ -441,7 +454,7 @@ describe('e2e', () => {
 
     return async () => {
       reducers.forEach((r) => r.close());
-      await Promise.all(servers.map(closeServer));
+      await Promise.all(servers.map((s) => s.closeWithTimeout('end of test', 0)));
       await Promise.all(proxies.map((p) => p.close()));
     };
   });
@@ -453,7 +466,7 @@ interface ReducerOptions {
 }
 
 interface Runner {
-  runServer(app: Application): Promise<Server>;
+  runServer(app: WebListener): Promise<AugmentedServer>;
   runProxy(target: Server): Promise<BreakableTcpProxy>;
   getReducer<T>(
     server: Server,
@@ -466,8 +479,7 @@ interface Runner {
   ): Promise<
     Runner & {
       broadcaster: Broadcaster<T, Spec<T>>;
-      handlerFactory: WebsocketHandlerFactory<T, Spec<T>>;
-      server: Server;
+      server: AugmentedServer;
     }
   >;
 }
