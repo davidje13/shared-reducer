@@ -70,7 +70,7 @@ describe('e2e', () => {
       });
       router.ws(
         '/:id',
-        auth.handler,
+        auth,
         handlerFactory.handler({
           accessGetter: (req) => ({ id: getPathParameter(req, 'id'), permission: ReadWrite }),
           acceptWebSocket,

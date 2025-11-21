@@ -305,7 +305,7 @@ function mockAuth() {
         return {};
       },
       fallbackTokenFetcher: makeWebSocketFallbackTokenFetcher(acceptWebSocket),
-    }).handler,
+    }),
   };
   return r;
 }
