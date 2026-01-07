@@ -1,17 +1,12 @@
 import type { Model } from './Model';
 
-// type matches collection-storage
+// this is a subset of collection-storage's Collection<T>
 interface Collection<T> {
-  get<K extends keyof T & string>(
-    searchAttribute: K,
-    searchValue: T[K],
-  ): Promise<Readonly<T> | null>;
-
-  update<K extends keyof T & string>(
-    searchAttribute: K,
-    searchValue: T[K],
-    update: Partial<T>,
-  ): Promise<void>;
+  where<K extends string & keyof T>(attribute: K, value: T[K]): Filtered<T>;
+}
+interface Filtered<T> {
+  get(): Promise<Readonly<T> | null>;
+  update(delta: Partial<T>): Promise<void>;
 }
 
 type ErrorMapper = (e: unknown) => unknown;
@@ -39,7 +34,7 @@ export class CollectionStorageModel<T extends object, K extends keyof T & string
 
   public async read(id: T[K]): Promise<Readonly<T> | null> {
     try {
-      return await this._collection.get(this._idCol, id);
+      return await this._collection.where(this._idCol, id).get();
     } catch (e) {
       throw this._readErrorIntercept(e);
     }
@@ -65,7 +60,7 @@ export class CollectionStorageModel<T extends object, K extends keyof T & string
     });
 
     try {
-      await this._collection.update(this._idCol, id, diff);
+      await this._collection.where(this._idCol, id).update(diff);
     } catch (e) {
       throw this._writeErrorIntercept(e);
     }

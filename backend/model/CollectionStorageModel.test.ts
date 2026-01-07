@@ -1,16 +1,12 @@
-import { default as cs, type Collection } from 'collection-storage';
+import { CollectionStorage, type Collection } from 'collection-storage';
 import { CollectionStorageModel } from './CollectionStorageModel';
-
-// exports from collection-storage are not properly compatible with ES6 imports,
-// so for now we map the values to maintain type safety:
-const connectDB: (typeof cs)['connect'] = (cs as any).default.connect;
 
 describe('CollectionStorageModel', () => {
   const STORAGE = beforeEach<{
     collection: Collection<TestT>;
     model: CollectionStorageModel<TestT, 'id'>;
   }>(async ({ setParameter }) => {
-    const db = await connectDB('memory://');
+    const db = await CollectionStorage.connect('memory://');
     const collection = db.getCollection<TestT>('col');
     await collection.add({ id: 'abc', foo: 6 });
     const model = new CollectionStorageModel(collection, 'id', validator);
@@ -39,7 +35,7 @@ describe('CollectionStorageModel', () => {
       const old = await model.read('abc');
       await model.write('abc', { id: 'abc', foo: 2 }, old!);
 
-      const value = await collection.get('id', 'abc');
+      const value = await collection.where('id', 'abc').get();
       expect(value).toEqual({ id: 'abc', foo: 2 });
     });
 
@@ -48,13 +44,16 @@ describe('CollectionStorageModel', () => {
       await model.write('abc', { id: 'abc', foo: 2 }, { id: 'abc', foo: 2 });
 
       // foo should not change as no diff was found
-      const value = await collection.get('id', 'abc');
+      const value = await collection.where('id', 'abc').get();
       expect(value).toEqual({ id: 'abc', foo: 6 });
     });
 
     it('avoids prototype access', async ({ getTyped }) => {
       const { collection, model } = getTyped(STORAGE);
-      const spy = mock(collection, 'update').whenCalled().thenResolve(null);
+      const updateSpy = mock().returning(Promise.resolve());
+      mock(collection, 'where')
+        .whenCalled()
+        .thenReturn({ update: updateSpy } as any);
 
       await model.write(
         'abc',
@@ -62,7 +61,7 @@ describe('CollectionStorageModel', () => {
         { id: 'abc', foo: 2 },
       );
 
-      const diff = spy.getInvocation().arguments[2] as any;
+      const diff = updateSpy.getInvocation().arguments[0];
       expect(diff.injected).toBeUndefined();
       expect(diff.__proto__.injected).toEqual('gotchya');
     });
