@@ -5,10 +5,10 @@ interface Type {
   a: number;
 }
 
-const reducer = new SharedReducer<Type, Spec<Type>>(context, () => ({
+const reducer = new SharedReducer<Type, Spec<Type>>(context, {
   url: 'ws://destination',
   token: 'my-token',
-}));
+});
 
 reducer.addStateListener((state) => {
   console.log('latest state is', state);

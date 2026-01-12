@@ -24,10 +24,13 @@ export class TypedEventTarget<Events extends Record<string, Event>> extends Even
   }
 }
 
-export const makeEvent: EventMaker = <K extends string, D>(type: K, detail?: D) =>
-  new CustomEvent<D>(type, { detail: detail! }) as TypedEvent<K, CustomEvent<D>>;
+export const makeEvent: EventMaker = <K extends string, D>(type: K, init?: CustomEventInit<D>) =>
+  new CustomEvent<D>(type, init) as TypedEvent<K, CustomEvent<D>>;
 
 type TypedEvent<Type extends string, T extends Event> = T & { readonly type: Type };
 
-type EventMaker = (<K extends string, D>(type: K, detail: D) => TypedEvent<K, CustomEvent<D>>) &
+type EventMaker = (<K extends string, D>(
+  type: K,
+  init: CustomEventInit<D>,
+) => TypedEvent<K, CustomEvent<D>>) &
   (<K extends string>(type: K) => TypedEvent<K, CustomEvent<void>>);

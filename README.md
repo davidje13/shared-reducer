@@ -164,10 +164,10 @@ fields are added or types are changed).
 import { SharedReducer } from 'shared-reducer/frontend';
 import context from 'json-immutability-helper';
 
-const reducer = new SharedReducer(context, () => ({
+const reducer = new SharedReducer(context, {
   url: 'ws://destination',
   token: 'my-token',
-}));
+});
 
 reducer.addStateListener((state) => {
   console.log('latest state is', state);
@@ -290,9 +290,9 @@ import listCommands from 'json-immutability-helper/commands/list';
 import mathCommands from 'json-immutability-helper/commands/math';
 import context from 'json-immutability-helper';
 
-const reducer = new SharedReducer(context.with(listCommands, mathCommands), () => ({
+const reducer = new SharedReducer(context.with(listCommands, mathCommands), {
   url: 'ws://destination',
-}));
+});
 ```
 
 If you want to use an entirely different reducer, create a wrapper:
@@ -315,7 +315,7 @@ const myReducer = {
 const broadcaster = new Broadcaster(new InMemoryModel(), myReducer);
 
 // Frontend
-const reducer = new SharedReducer(myReducer, () => ({ url: 'ws://destination' }));
+const reducer = new SharedReducer(myReducer, { url: 'ws://destination' });
 ```
 
 Be careful when using your own reducer to avoid introducing security vulnerabilities; the functions
@@ -389,17 +389,21 @@ the page regains focus or the computer rejoins a network. You can fully customis
 ```javascript
 import { SharedReducer, OnlineScheduler, exponentialDelay } from 'shared-reducer/frontend';
 
-const reducer = new SharedReducer(context, () => ({ url: 'ws://destination' }), {
-  scheduler: new OnlineScheduler(
-    exponentialDelay({
-      base: 2,
-      initialDelay: 200,
-      maxDelay: 10 * 60 * 1000,
-      randomness: 0.3,
-    }),
-    20 * 1000, // timeout for each connection attempt
-  ),
-});
+const reducer = new SharedReducer(
+  context,
+  { url: 'ws://destination' },
+  {
+    scheduler: new OnlineScheduler(
+      exponentialDelay({
+        base: 2,
+        initialDelay: 200,
+        maxDelay: 10 * 60 * 1000,
+        randomness: 0.3,
+      }),
+      20 * 1000, // timeout for each connection attempt
+    ),
+  },
+);
 ```
 
 The `exponentialDelay` helper returns:
@@ -414,15 +418,35 @@ You can also provide a custom function instead of `exponentialDelay`; it will be
 attempt number (0-based), and should return the number of milliseconds to wait before triggering the
 attempt.
 
+If you need to reauthenticate (e.g. due to an expired token), you can listen for the `'rejected'`
+event and call `reconnect` with a new token (or a new URL):
+
+```javascript
+const reducer = new SharedReducer(context, { url: 'ws://destination', token: 'my-initial-token' });
+reducer.addEventListener('rejected', (e) => {
+  if (e.detail.code === 4401) {
+    // example websocket code sent by server when rejecting the auth
+    e.preventDefault(); // do not automatically retry
+
+    // these steps do not need to be performed synchronously;
+    // just call .reconnect once you have a new token to use
+    const password = prompt('Enter the new password');
+    reducer.reconnect({ url: 'ws://destination', token: tokenFromPassword(password) });
+  }
+});
+```
+
 Finally, by default when reconnecting `SharedReducer` will replay all messages which have not been
 confirmed (`AT_LEAST_ONCE` delivery). You can change this to `AT_MOST_ONCE` or a custom mechanism:
 
 ```javascript
 import { SharedReducer, AT_MOST_ONCE } from 'shared-reducer/frontend';
 
-const reducer = new SharedReducer(context, () => ({ url: 'ws://destination' }), {
-  deliveryStrategy: AT_MOST_ONCE,
-});
+const reducer = new SharedReducer(
+  context,
+  { url: 'ws://destination' },
+  { deliveryStrategy: AT_MOST_ONCE },
+);
 ```
 
 Custom strategies can be defined as functions:

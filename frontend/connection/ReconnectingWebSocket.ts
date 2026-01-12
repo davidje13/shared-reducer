@@ -1,10 +1,10 @@
-import type { MaybePromise } from '../helpers/MaybePromise';
 import { makeEvent, TypedEventTarget } from '../helpers/TypedEventTarget';
 import type { Scheduler } from '../scheduler/Scheduler';
 
 type ReconnectingWebSocketEvents = {
   connected: CustomEvent<void>;
   disconnected: CustomEvent<DisconnectDetail>;
+  rejected: CustomEvent<DisconnectDetail>;
   connectionfailure: CustomEvent<Error>;
   message: CustomEvent<string>;
 };
@@ -14,7 +14,7 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
   private _closed = false;
 
   public constructor(
-    private readonly _connectionGetter: ConnectionGetter,
+    private _connectionInfo: ConnectionInfo,
     private readonly _reconnectScheduler: Scheduler,
   ) {
     super();
@@ -23,20 +23,28 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
     this._reconnectScheduler.trigger(this._reconnect, this._handleError);
   }
 
-  private _handleError(e: unknown) {
-    const err = e instanceof Error ? e : new Error(`unknown connection error ${e}`);
-    this.dispatchEvent(makeEvent('connectionfailure', err));
+  reconnect(connectionInfo?: ConnectionInfo) {
+    if (connectionInfo) {
+      this._connectionInfo = connectionInfo;
+    }
+    if (this._ws) {
+      this._ws.close();
+    } else if (!this._closed) {
+      this._reconnectScheduler.schedule(this._reconnect, this._handleError);
+    }
   }
 
-  private async _reconnect(s: AbortSignal) {
-    const { url, token } = await this._connectionGetter(s);
-    if (s.aborted) {
-      // AbortSignal.throwIfAborted is not currently supported in JSDOM
-      throw s.reason;
-    }
+  private _handleError(e: unknown) {
+    const err = e instanceof Error ? e : new Error(`unknown connection error ${e}`);
+    this.dispatchEvent(makeEvent('connectionfailure', { detail: err }));
+  }
+
+  private async _reconnect(signal: AbortSignal) {
+    signal.throwIfAborted();
 
     const connectionAC = new AbortController();
     const connectionSignal = connectionAC.signal;
+    const { url, token } = this._connectionInfo;
     await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url);
 
@@ -44,15 +52,23 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
       const handleClose = (detail: DisconnectDetail) => {
         connectionAC.abort();
         ws.close();
-        if (connecting) {
-          connecting = false;
-          reject(new Error(`Connection closed ${detail.code} ${detail.reason}`));
-        } else {
+        const wasConnecting = connecting;
+        connecting = false;
+        if (!wasConnecting) {
           this._ws = null;
-          this.dispatchEvent(makeEvent('disconnected', detail));
-          if (!this._closed) {
-            this._reconnectScheduler.schedule(this._reconnect, this._handleError);
+          this.dispatchEvent(makeEvent('disconnected', { detail }));
+        }
+        if (
+          !this._closed &&
+          !this.dispatchEvent(makeEvent('rejected', { detail, cancelable: true }))
+        ) {
+          if (wasConnecting) {
+            resolve();
           }
+        } else if (wasConnecting) {
+          reject(new Error(`Connection closed ${detail.code} ${detail.reason}`));
+        } else if (!this._closed) {
+          this._reconnectScheduler.schedule(this._reconnect, this._handleError);
         }
       };
 
@@ -72,20 +88,34 @@ export class ReconnectingWebSocket extends TypedEventTarget<ReconnectingWebSocke
             this.dispatchEvent(makeEvent('connected'));
             resolve();
           }
-          this.dispatchEvent(makeEvent('message', e.data));
+          this.dispatchEvent(makeEvent('message', { detail: e.data }));
         },
         { signal: connectionSignal },
       );
 
       ws.addEventListener('close', handleClose, { signal: connectionSignal });
-      ws.addEventListener('error', () => handleClose(ERROR_DETAIL), { signal: connectionSignal });
-      s.addEventListener(
+      ws.addEventListener(
+        'error',
+        (e) => {
+          let err = 'unknown';
+          if ('error' in e) {
+            const error = e.error;
+            err = error instanceof Error ? (error.stack ?? String(error)) : String(error);
+          }
+          handleClose({
+            code: 0,
+            reason: `client side error: ${err}`,
+          });
+        },
+        { signal: connectionSignal },
+      );
+      signal.addEventListener(
         'abort',
-        () => () => {
+        () => {
           connectionAC.abort();
           ws.close();
           connecting = false;
-          reject(s.reason);
+          reject(signal.reason);
         },
         { signal: connectionSignal },
       );
@@ -152,14 +182,10 @@ export interface ConnectionInfo {
   token?: string | undefined;
 }
 
-export type ConnectionGetter = (signal: AbortSignal) => MaybePromise<ConnectionInfo>;
-
 export interface DisconnectDetail {
   code: number;
   reason: string;
 }
-
-const ERROR_DETAIL: DisconnectDetail = { code: 0, reason: 'client side error' };
 
 const PING = 'P';
 const PONG = 'p';

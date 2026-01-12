@@ -24,7 +24,10 @@ export class OnlineScheduler implements Scheduler {
     this._attempt();
   }
 
-  public schedule(handler: Handler, errorHandler: ErrorHandler) {
+  public schedule(handler: Handler, errorHandler: ErrorHandler, reset = true) {
+    if (reset) {
+      this._attempts = 0;
+    }
     if (this._handler === handler) {
       return;
     }
@@ -65,10 +68,10 @@ export class OnlineScheduler implements Scheduler {
       timeout.stop();
       ac.abort();
     };
+    const h = this._handler;
+    this._handler = null;
     try {
-      await Promise.race([this._handler(ac.signal), timeout.promise]);
-      this._handler = null;
-      this._attempts = 0;
+      await Promise.race([h(ac.signal), timeout.promise]);
     } catch (e) {
       if (!ac.signal.aborted) {
         ac.abort();
@@ -77,10 +80,8 @@ export class OnlineScheduler implements Scheduler {
         } catch (e2) {
           console.error('Error handler failed', e, e2);
         }
-        const h = this._handler;
         if (h) {
-          this._handler = null;
-          this.schedule(h, this._errorHandler);
+          this.schedule(h, this._errorHandler, false);
         }
       }
     } finally {

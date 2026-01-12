@@ -21,10 +21,10 @@ if (
   throw new Error('invalid handler type');
 }
 
-const reducer = new SharedReducer(context, () => ({
+const reducer = new SharedReducer(context, {
   url: 'ws://example.com',
   token: 'my-token',
-}));
+});
 reducer.addStateListener(() => null);
 reducer.dispatch(['=', 1]);
 reducer.close();

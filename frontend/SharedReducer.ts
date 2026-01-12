@@ -3,7 +3,7 @@ import { reduce } from './reduce';
 import { lock } from './helpers/lock';
 import {
   ReconnectingWebSocket,
-  type ConnectionGetter,
+  type ConnectionInfo,
   type DisconnectDetail,
 } from './connection/ReconnectingWebSocket';
 import { AT_LEAST_ONCE, type DeliveryStrategy } from './connection/deliveryStrategies';
@@ -27,6 +27,7 @@ export interface SharedReducerOptions<T, SpecT> {
 type SharedReducerEvents = {
   connected: CustomEvent<void>;
   disconnected: CustomEvent<DisconnectDetail>;
+  rejected: CustomEvent<DisconnectDetail>;
   warning: CustomEvent<Error>;
 };
 
@@ -40,7 +41,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
 
   public constructor(
     private readonly _context: Context<T, SpecT>,
-    connectionGetter: ConnectionGetter,
+    connectionInfo: ConnectionInfo,
     {
       scheduler = new OnlineScheduler(DEFAULT_RECONNECT, 20 * 1000),
       deliveryStrategy = AT_LEAST_ONCE,
@@ -48,11 +49,16 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
   ) {
     super();
     this._tracker = new LocalChangeTracker<T, SpecT>(_context, deliveryStrategy);
-    this._ws = new ReconnectingWebSocket(connectionGetter, scheduler);
+    this._ws = new ReconnectingWebSocket(connectionInfo, scheduler);
     this._ws.addEventListener('message', this._handleMessage);
     this._ws.addEventListener('connected', this._handleConnected);
     this._ws.addEventListener('connectionfailure', this._handleConnectionFailure);
+    this._ws.addEventListener('rejected', this._handleRejected);
     this._ws.addEventListener('disconnected', this._handleDisconnected);
+  }
+
+  reconnect(connectionInfo?: ConnectionInfo) {
+    this._ws.reconnect(connectionInfo);
   }
 
   public readonly dispatch = makeDispatch<T, SpecT>((specs, resolve, reject) => {
@@ -153,7 +159,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
       return;
     }
     this._paused = true;
-    this.dispatchEvent(makeEvent('disconnected', CLOSE_DETAIL));
+    this.dispatchEvent(makeEvent('disconnected', { detail: CLOSE_DETAIL }));
   }
 
   private readonly _handleMessage = (e: CustomEvent<string>) => {
@@ -201,7 +207,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
   }
 
   private _warn(message: string) {
-    this.dispatchEvent(makeEvent('warning', new Error(message)));
+    this.dispatchEvent(makeEvent('warning', { detail: new Error(message) }));
   }
 
   private readonly _handleConnected = () => {
@@ -209,13 +215,19 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
   };
 
   private readonly _handleConnectionFailure = (e: CustomEvent<Error>) => {
-    this.dispatchEvent(makeEvent('warning', e.detail));
+    this.dispatchEvent(makeEvent('warning', { detail: e.detail }));
+  };
+
+  private readonly _handleRejected = (e: CustomEvent<DisconnectDetail>) => {
+    if (!this.dispatchEvent(makeEvent('rejected', { detail: e.detail, cancelable: true }))) {
+      e.preventDefault();
+    }
   };
 
   private readonly _handleDisconnected = (e: CustomEvent<DisconnectDetail>) => {
     if (!this._paused) {
       this._paused = true;
-      this.dispatchEvent(makeEvent('disconnected', e.detail));
+      this.dispatchEvent(makeEvent('disconnected', { detail: e.detail }));
     }
   };
 
@@ -228,6 +240,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this._ws.removeEventListener('message', this._handleMessage);
     this._ws.removeEventListener('connected', this._handleConnected);
     this._ws.removeEventListener('connectionfailure', this._handleConnectionFailure);
+    this._ws.removeEventListener('rejected', this._handleRejected);
     this._ws.removeEventListener('disconnected', this._handleDisconnected);
   }
 }

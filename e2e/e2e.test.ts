@@ -10,6 +10,7 @@ import {
   setSoftCloseHandler,
   WebListener,
   type AugmentedServer,
+  type UpgradeHandler,
 } from 'web-listener';
 import { WebSocket, WebSocketServer } from 'ws';
 import 'lean-test';
@@ -33,6 +34,7 @@ import {
   exponentialDelay,
   OnlineScheduler,
   SharedReducer,
+  type DisconnectDetail,
   type DispatchSpec,
   type SharedReducerOptions,
 } from '../frontend';
@@ -53,13 +55,7 @@ describe('e2e', () => {
     });
 
     it('sends any required authentication before beginning', async ({ getTyped }) => {
-      const runner = getTyped(RUNNER);
-      const model = new InMemoryModel<string, TestT>();
-      model.set('a', { foo: 'v1', bar: 10 });
-      const broadcaster = new Broadcaster<TestT, Spec<TestT>>(model, context);
-      const handlerFactory = new WebsocketHandlerFactory(broadcaster);
       let capturedToken = '';
-      const router = new Router();
       const auth = requireBearerAuth({
         realm: () => '',
         extractAndValidateToken: (token) => {
@@ -68,18 +64,11 @@ describe('e2e', () => {
         },
         fallbackTokenFetcher: makeWebSocketFallbackTokenFetcher(acceptWebSocket),
       });
-      router.ws(
-        '/:id',
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE, ReadWrite, [
         auth,
-        handlerFactory.handler({
-          accessGetter: (req) => ({ id: getPathParameter(req, 'id'), permission: ReadWrite }),
-          acceptWebSocket,
-          setSoftCloseHandler,
-        }),
-      );
-      const server = await runner.runServer(new WebListener(router));
+      ]);
 
-      const reducer = runner.getReducer<TestT>(server, '/a', { token: 'my-token' });
+      const reducer = getReducer<TestT>(server, '/a', { token: 'my-token' });
 
       const initialState = await new Promise((resolve) => reducer.addStateListener(resolve));
       expect(initialState).toEqual({ foo: 'v1', bar: 10 });
@@ -241,13 +230,7 @@ describe('e2e', () => {
       const { broadcaster, server, runProxy, getReducer } =
         await getTyped(RUNNER).basicSetup(INITIAL_STATE);
       const proxy = await runProxy(server);
-
-      const specs: ChangeInfo<Spec<TestT>>[] = [];
-      const s = await broadcaster.subscribe('a');
-      if (!s) {
-        return fail();
-      }
-      s.listen((s) => specs.push(s));
+      const serverside = await gatherSpecs(broadcaster, 'a');
 
       const reducer = getReducer<TestT>(proxy.server, '/a', {
         warningHandler: () => null,
@@ -267,19 +250,79 @@ describe('e2e', () => {
 
       expect(reducer.getState()).toEqual({ foo: 'while offline', bar: 2 });
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while online', bar: 1 });
-      expect(specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
+      expect(serverside.specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
 
       proxy.resume();
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
 
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
-      expect(specs).toEqual([
+      expect(serverside.specs).toEqual([
         { change: ['=', { foo: 'while online', bar: 1 }] },
         { change: { bar: ['=', 2] } },
         { change: { foo: ['=', 'while offline'] } },
       ]);
 
-      s.close();
+      await serverside.close();
+    });
+
+    it('fires rejected and allows changing details when the connection is lost', async ({
+      getTyped,
+    }) => {
+      let requiredToken = 'first';
+      const auth = requireBearerAuth({
+        realm: () => '',
+        extractAndValidateToken: (token) => {
+          if (token === requiredToken) {
+            return {};
+          }
+          throw new Error('denied');
+        },
+        fallbackTokenFetcher: makeWebSocketFallbackTokenFetcher(acceptWebSocket),
+      });
+
+      const { broadcaster, server, runProxy, getReducer } = await getTyped(RUNNER).basicSetup(
+        INITIAL_STATE,
+        ReadWrite,
+        [auth],
+      );
+      const proxy = await runProxy(server);
+      const serverside = await gatherSpecs(broadcaster, 'a');
+
+      const reducer = getReducer<TestT>(proxy.server, '/a', {
+        warningHandler: () => null,
+        deliveryStrategy: AT_LEAST_ONCE,
+        scheduler: new OnlineScheduler(rapidRetry, 1000),
+        token: 'first',
+      });
+
+      reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
+      expect(serverside.specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
+
+      proxy.pullWire();
+      requiredToken = 'second';
+
+      const capturedRejection = await new Promise<DisconnectDetail>((resolve) => {
+        reducer.addEventListener('rejected', (e) => {
+          if (e.detail.code >= 4000) {
+            e.preventDefault();
+            resolve(e.detail);
+          }
+        });
+        proxy.resume();
+        reducer.dispatch([['=', { foo: 'while offline', bar: 1 }]]);
+      });
+      expect(capturedRejection.code).toEqual(4401);
+      reducer.reconnect({ url: getAddressURL(server.address(), 'ws') + '/a', token: 'second' });
+
+      expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect with new password
+
+      expect(serverside.specs).toEqual([
+        { change: ['=', { foo: 'while online', bar: 1 }] },
+        { change: ['=', { foo: 'while offline', bar: 1 }] },
+      ]);
+
+      await serverside.close();
     });
 
     it('AT_MOST_ONCE discards changes which may have already been received', async ({
@@ -288,13 +331,7 @@ describe('e2e', () => {
       const { broadcaster, server, runProxy, getReducer } =
         await getTyped(RUNNER).basicSetup(INITIAL_STATE);
       const proxy = await runProxy(server);
-
-      const specs: ChangeInfo<Spec<TestT>>[] = [];
-      const s = await broadcaster.subscribe('a');
-      if (!s) {
-        return fail();
-      }
-      s.listen((s) => specs.push(s));
+      const serverside = await gatherSpecs(broadcaster, 'a');
 
       const reducer = getReducer<TestT>(proxy.server, '/a', {
         warningHandler: () => null,
@@ -315,13 +352,13 @@ describe('e2e', () => {
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect
 
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 1 });
-      expect(specs).toEqual([
+      expect(serverside.specs).toEqual([
         { change: ['=', { foo: 'while online', bar: 1 }] },
         // bar=2 change is lost - client does not know if it was received when the wire was pulled
         { change: { foo: ['=', 'while offline'] } },
       ]);
 
-      s.close();
+      await serverside.close();
     });
 
     it('pauses sending after a graceful shutdown message', async ({ getTyped }) => {
@@ -422,7 +459,7 @@ describe('e2e', () => {
         const host = getAddressURL(server.address(), 'ws');
         const reducer = new SharedReducer<T, Spec<T>>(
           context,
-          () => ({ url: host + path, token }),
+          { url: host + path, token },
           options,
         );
         reducer.addEventListener('warning', (e) => warningHandler(e.detail.message));
@@ -430,7 +467,11 @@ describe('e2e', () => {
         return reducer;
       },
 
-      basicSetup: async <T>(initialState: T, permission = ReadWrite) => {
+      basicSetup: async <T>(
+        initialState: T,
+        permission = ReadWrite,
+        middleware: UpgradeHandler[] = [],
+      ) => {
         const model = new InMemoryModel<string, T>();
         model.set('a', initialState);
         const broadcaster = new Broadcaster<T, Spec<T>>(model, context);
@@ -438,6 +479,7 @@ describe('e2e', () => {
         const router = new Router();
         router.ws(
           '/:id',
+          ...middleware,
           handlerFactory.handler({
             accessGetter: (req) => ({ id: getPathParameter(req, 'id'), permission }),
             acceptWebSocket,
@@ -475,7 +517,8 @@ interface Runner {
   ): SharedReducer<T, Spec<T>>;
   basicSetup<T>(
     initialState: T,
-    permission?: Permission<T, Spec<T>>,
+    permission?: Permission<NoInfer<T>, Spec<NoInfer<T>>>,
+    middleware?: UpgradeHandler[],
   ): Promise<
     Runner & {
       broadcaster: Broadcaster<T, Spec<T>>;
@@ -494,13 +537,23 @@ const rapidRetry = exponentialDelay({ initialDelay: 100, maxDelay: 300 });
 const INITIAL_STATE: TestT = { foo: 'v1', bar: 10 };
 
 async function peekState<T>(broadcaster: Broadcaster<T, any>, id: string): Promise<T | null> {
-  const s = await broadcaster.subscribe(id);
-  if (!s) {
+  const sub = await broadcaster.subscribe(id);
+  if (!sub) {
     return null;
   }
   try {
-    return s.getInitialData();
+    return sub.getInitialData();
   } finally {
-    await s.close();
+    await sub.close();
   }
+}
+
+async function gatherSpecs<T>(broadcaster: Broadcaster<T, Spec<T>>, id: string) {
+  const specs: ChangeInfo<Spec<T>>[] = [];
+  const serverSub = await broadcaster.subscribe(id);
+  if (!serverSub) {
+    throw new Error(`Failed to subscribe to ${id}`);
+  }
+  serverSub.listen((spec) => specs.push(spec));
+  return { specs, close: () => serverSub.close() };
 }
