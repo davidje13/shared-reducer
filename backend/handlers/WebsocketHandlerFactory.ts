@@ -35,7 +35,7 @@ export interface WebsocketHandlerOptions<Arg0> {
   pongTimeout?: number;
   notFoundError?: Error;
   setSoftCloseHandler?: (arg0: Arg0, handler: () => Promise<void>) => void;
-  onConnect?: (arg0: Arg0) => void;
+  onConnect?: (arg0: Arg0, id: string, permission: Permission<unknown, unknown>) => void;
   onDisconnect?: (arg0: Arg0, reason: string, connectionDuration: number) => void;
   onError?: (arg0: Arg0, error: unknown, context: string) => void;
 }
@@ -94,7 +94,7 @@ export class WebsocketHandlerFactory<T, SpecT> {
           return closePromise;
         });
         const begin = Date.now();
-        onConnect?.(args[0]);
+        onConnect?.(args[0], id, permission);
         teardowns.push(() => onDisconnect?.(args[0], closeReason, Date.now() - begin));
 
         ws.on('close', () => {

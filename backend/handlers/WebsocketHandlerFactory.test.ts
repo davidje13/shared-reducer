@@ -236,7 +236,7 @@ describe('WebsocketHandlerFactory', () => {
     await request(server)
       .ws('/a')
       .expectJson()
-      .exec(() => expect(onConnect).toHaveBeenCalled())
+      .exec(() => expect(onConnect).toHaveBeenCalledWith(any(), equals('a'), any()))
       .exec(() => expect(onDisconnect).not(toHaveBeenCalled()))
       .close()
       .expectClosed();
