@@ -10,4 +10,8 @@ export const ReadOnly: Permission<unknown, unknown> = {
   validateWrite() {
     throw new PermissionError(READ_ONLY_ERROR);
   },
+
+  validateEvent() {
+    throw new PermissionError(READ_ONLY_ERROR);
+  },
 };

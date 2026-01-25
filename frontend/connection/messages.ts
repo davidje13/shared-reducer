@@ -1,3 +1,5 @@
+export type ChangeEvent = [string, ...unknown[]];
+
 export interface InitMessage<T> {
   init: T;
   id?: undefined;
@@ -5,6 +7,7 @@ export interface InitMessage<T> {
 
 export interface ChangeMessage<SpecT> {
   change: SpecT;
+  events?: ChangeEvent[];
   id?: number;
 }
 

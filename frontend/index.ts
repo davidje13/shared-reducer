@@ -3,6 +3,7 @@ export type { Scheduler } from './scheduler/Scheduler';
 export { OnlineScheduler, exponentialDelay } from './scheduler/OnlineScheduler';
 export { SharedReducer, type SharedReducerOptions } from './SharedReducer';
 export type { ConnectionInfo, DisconnectDetail } from './connection/ReconnectingWebSocket';
+export type { ChangeEvent } from './connection/messages';
 export {
   type DeliveryStrategy,
   AT_LEAST_ONCE,

@@ -13,7 +13,10 @@ describe('Broadcaster', () => {
 
     await broadcaster.update('a', { foo: ['=', 'v2'] });
 
-    expect(changeListener).toHaveBeenCalledWith({ change: { foo: ['=', 'v2'] } }, undefined);
+    expect(changeListener).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: undefined },
+      undefined,
+    );
 
     await subscription.close();
   });
@@ -59,16 +62,49 @@ describe('Broadcaster', () => {
     const subscription2 = await subscribe<number>('a');
     subscription2.listen(changeListener2);
 
-    await subscription1.send({ foo: ['=', 'v2'] }, 20);
+    await subscription1.send({ foo: ['=', 'v2'] }, [], 20);
 
-    expect(changeListener1).toHaveBeenCalledWith({ change: { foo: ['=', 'v2'] } }, 20);
-    expect(changeListener2).toHaveBeenCalledWith({ change: { foo: ['=', 'v2'] } }, undefined);
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: undefined },
+      20,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: undefined },
+      undefined,
+    );
 
     await subscription1.close();
     await subscription2.close();
   });
 
-  it('queues events received after loading initial data until listen is called', async () => {
+  it('shares events between client', async () => {
+    const { model, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    const changeListener1 = mock<ChangeListenerT>();
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
+
+    const changeListener2 = mock<ChangeListenerT>();
+    const subscription2 = await subscribe<number>('a');
+    subscription2.listen(changeListener2);
+
+    await subscription1.send({ foo: ['=', 'v2'] }, [['foo']], 20);
+
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: [['foo']] },
+      20,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: [['foo']] },
+      undefined,
+    );
+
+    await subscription1.close();
+    await subscription2.close();
+  });
+
+  it('queues changes received after loading initial data until listen is called', async () => {
     const { model, broadcaster, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
 
@@ -81,7 +117,36 @@ describe('Broadcaster', () => {
 
     subscription.listen(changeListener);
     expect(changeListener).toHaveBeenCalled({ times: 1 });
-    expect(changeListener).toHaveBeenCalledWith({ change: { foo: ['=', 'v3'] } }, undefined);
+    expect(changeListener).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v3'] }, events: undefined },
+      undefined,
+    );
+
+    await subscription.close();
+  });
+
+  it('includes events with queued changes', async () => {
+    const { model, broadcaster, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    await broadcaster.update('a', { foo: ['=', 'v2'] }, { events: [['before']] }); // not queued
+
+    const changeListener = mock<ChangeListenerT>();
+    const subscription = await subscribe<number>('a');
+
+    await broadcaster.update('a', { foo: ['=', 'v3'] }, { events: [['after1']] }); // queued
+    await broadcaster.update('a', { foo: ['=', 'v4'] }, { events: [['after2']] }); // queued
+
+    subscription.listen(changeListener);
+    expect(changeListener).toHaveBeenCalled({ times: 2 });
+    expect(changeListener).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v3'] }, events: [['after1']] },
+      undefined,
+    );
+    expect(changeListener).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v4'] }, events: [['after2']] },
+      undefined,
+    );
 
     await subscription.close();
   });
@@ -100,7 +165,7 @@ describe('Broadcaster', () => {
 
     await subscription1.close();
 
-    await subscription2.send({ foo: ['=', 'v2'] }, 20);
+    await subscription2.send({ foo: ['=', 'v2'] }, [], 20);
     expect(changeListener1).not(toHaveBeenCalled());
     expect(changeListener2).toHaveBeenCalled();
 
@@ -120,7 +185,7 @@ describe('Broadcaster', () => {
     subscription2.listen(changeListener2);
 
     const invalidType = 'eek' as unknown as TestT;
-    await subscription1.send(['=', invalidType], 20);
+    await subscription1.send(['=', invalidType], [], 20);
 
     expect(changeListener1).toHaveBeenCalledWith({ error: 'should be an object' }, 20);
     expect(changeListener2).not(toHaveBeenCalled());

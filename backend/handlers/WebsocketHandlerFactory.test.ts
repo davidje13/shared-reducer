@@ -22,7 +22,7 @@ import { Broadcaster } from '../Broadcaster';
 import { ReadWrite } from '../permission/ReadWrite';
 import { ReadOnly } from '../permission/ReadOnly';
 import { ReadWriteStruct } from '../permission/ReadWriteStruct';
-import type { Permission } from '../permission/Permission';
+import { PermissionError, type Permission } from '../permission/Permission';
 import { WebsocketHandlerFactory, type WebsocketHandlerOptions } from './WebsocketHandlerFactory';
 
 const acceptWebSocket = makeAcceptWebSocket(WebSocketServer);
@@ -37,7 +37,7 @@ describe('WebsocketHandlerFactory', () => {
     return () => server.closeWithTimeout('end of test', 0);
   });
 
-  it('creates a websocket-express compatible handler', async ({ getTyped }) => {
+  it('creates a web-listener compatible handler', async ({ getTyped }) => {
     const { server } = setupServer(getTyped(SERVER_FACTORY));
 
     await request(server).ws('/a');
@@ -59,6 +59,16 @@ describe('WebsocketHandlerFactory', () => {
       .expectJson()
       .sendJson({ change: { foo: ['=', 'v2'] } })
       .expectJson({ change: { foo: ['=', 'v2'] } });
+  });
+
+  it('reflects events', async ({ getTyped }) => {
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
+
+    await request(server)
+      .ws('/a')
+      .expectJson()
+      .sendJson({ change: {}, events: [['foo', 1]] })
+      .expectJson({ change: {}, events: [['foo', 1]] });
   });
 
   it('rejects invalid messages', async ({ getTyped }) => {
@@ -99,6 +109,23 @@ describe('WebsocketHandlerFactory', () => {
       .expectJson({ error: 'Cannot edit field foo' });
   });
 
+  it('rejects events forbidden by permissions', async ({ getTyped }) => {
+    const { server } = setupServer(getTyped(SERVER_FACTORY), {
+      permission: {
+        validateWrite: () => {},
+        validateEvent: () => {
+          throw new PermissionError('nope');
+        },
+      },
+    });
+
+    await request(server)
+      .ws('/a')
+      .expectJson()
+      .sendJson({ change: { foo: ['=', 'v2'] }, events: [['foo']] })
+      .expectJson({ error: 'nope' });
+  });
+
   it('rejects changes forbidden by model', async ({ getTyped }) => {
     const { server } = setupServer(getTyped(SERVER_FACTORY));
 
@@ -137,6 +164,31 @@ describe('WebsocketHandlerFactory', () => {
         .expectJson({ init: { foo: 'v1' } })
         .exec(sentinel.resolve)
         .expectJson({ change: { foo: ['=', 'v2'] } }),
+    ]);
+
+    await request(server)
+      .ws('/a')
+      .expectJson({ init: { foo: 'v2' } });
+  });
+
+  it('sends events to other current subscribers', async ({ getTyped }) => {
+    const { server } = setupServer(getTyped(SERVER_FACTORY));
+
+    const sentinel = new Sentinel();
+
+    await Promise.all([
+      request(server)
+        .ws('/a')
+        .expectJson({ init: { foo: 'v1' } })
+        .exec(sentinel.await)
+        .sendJson({ change: { foo: ['=', 'v2'] }, events: [['foo', 1]], id: 20 })
+        .expectJson({ change: { foo: ['=', 'v2'] }, events: [['foo', 1]], id: 20 }),
+
+      request(server)
+        .ws('/a')
+        .expectJson({ init: { foo: 'v1' } })
+        .exec(sentinel.resolve)
+        .expectJson({ change: { foo: ['=', 'v2'] }, events: [['foo', 1]] }),
     ]);
 
     await request(server)

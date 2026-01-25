@@ -6,10 +6,12 @@ import { InMemoryTopic } from './topic/InMemoryTopic';
 import type { Permission } from './permission/Permission';
 import { ReadWrite } from './permission/ReadWrite';
 import type { Model } from './model/Model';
+import type { ChangeEvent } from './model/ChangeEvent';
 import type { MaybePromise } from './helpers/MaybePromise';
 
 export interface Context<T, SpecT> {
   update: (input: T, spec: SpecT) => T;
+  isNoOp?: (spec: SpecT) => boolean;
 }
 
 type Listener<SpecT, MetaT> = (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void;
@@ -17,14 +19,14 @@ type Listener<SpecT, MetaT> = (message: ChangeInfo<SpecT>, meta: MetaT | undefin
 export interface Subscription<T, SpecT, MetaT> {
   getInitialData(): Readonly<T>;
   listen(onChange: Listener<SpecT, MetaT>): void;
-  send(change: SpecT, meta?: MetaT): Promise<void>;
+  send(change: SpecT, events?: ChangeEvent[] | undefined, meta?: MetaT): Promise<void>;
   close(): Promise<void>;
 }
 
 type Identifier = string | null;
 
 export type ChangeInfo<SpecT> =
-  | { change: SpecT; error?: undefined }
+  | { change: SpecT; events: Readonly<Readonly<ChangeEvent>[]> | undefined; error?: undefined }
   | { change?: undefined; error: string };
 
 export interface TopicMessage<SpecT> {
@@ -110,7 +112,8 @@ export class Broadcaster<T, SpecT> {
         state = { _stage: 2, _onChange: onChange };
         queue.forEach(eventHandler);
       },
-      send: (change, meta) => this._internalQueueChange(id, change, permission, myId, meta),
+      send: (change, events, meta) =>
+        this._internalQueueChange(id, change, events, permission, myId, meta),
       close: async () => {
         await this._subscribers.remove(id, eventHandler);
       },
@@ -120,29 +123,43 @@ export class Broadcaster<T, SpecT> {
   public update(
     id: ID,
     change: SpecT,
-    permission: Permission<T, SpecT> = ReadWrite,
+    {
+      events,
+      permission = ReadWrite,
+    }: {
+      events?: ChangeEvent[] | undefined;
+      permission?: Permission<T, SpecT>;
+    } = {},
   ): Promise<void> {
-    return this._internalQueueChange(id, change, permission, null, undefined);
+    return this._internalQueueChange(id, change, events, permission, null, undefined);
   }
 
   private async _internalApplyChange(
     id: ID,
     change: SpecT,
+    events: ChangeEvent[] | undefined,
     permission: Permission<T, SpecT>,
     source: Identifier,
     meta: unknown,
   ) {
-    try {
-      const original = await this._model.read(id);
-      if (!original) {
-        throw new Error('Deleted');
+    if (events?.length) {
+      for (const evt of events) {
+        permission.validateEvent(evt);
       }
+    }
+    try {
       permission.validateWriteSpec?.(change);
-      const updated = this._context.update(original, change);
-      const validatedUpdate = this._model.validate(updated);
-      permission.validateWrite(validatedUpdate, original);
+      if (!this._context.isNoOp?.(change)) {
+        const original = await this._model.read(id);
+        if (!original) {
+          throw new Error('Deleted');
+        }
+        const updated = this._context.update(original, change);
+        const validatedUpdate = this._model.validate(updated);
+        permission.validateWrite(validatedUpdate, original);
 
-      await this._model.write(id, validatedUpdate, original);
+        await this._model.write(id, validatedUpdate, original);
+      }
     } catch (e) {
       this._subscribers.broadcast(id, {
         message: { error: e instanceof Error ? e.message : 'Internal error' },
@@ -151,9 +168,12 @@ export class Broadcaster<T, SpecT> {
       });
       return;
     }
+    if (events?.length === 0) {
+      events = undefined;
+    }
 
     this._subscribers.broadcast(id, {
-      message: { change },
+      message: { change, events },
       source,
       meta,
     });
@@ -162,12 +182,13 @@ export class Broadcaster<T, SpecT> {
   private async _internalQueueChange(
     id: ID,
     change: SpecT,
+    events: ChangeEvent[] | undefined,
     permission: Permission<T, SpecT>,
     source: Identifier,
     meta: unknown,
   ): Promise<void> {
     return this._taskQueues.push(id, () =>
-      this._internalApplyChange(id, change, permission, source, meta),
+      this._internalApplyChange(id, change, events, permission, source, meta),
     );
   }
 }

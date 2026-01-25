@@ -4,4 +4,8 @@ export const ReadWrite: Permission<unknown, unknown> = {
   validateWrite() {
     // nothing to do
   },
+
+  validateEvent() {
+    // nothing to do
+  },
 };

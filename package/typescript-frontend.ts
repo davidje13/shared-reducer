@@ -31,10 +31,10 @@ dispatch([
   },
 ]);
 
-dispatch(
-  [{ a: ['=', 8] }],
-  (state) => console.log('a after syncing is', state.a),
-  (message) => console.log('failed', message.substring(1)),
-);
+dispatch([{ a: ['=', 8] }], {
+  events: [['foo', 1, {}], ['bar'], ['baz', []]],
+  syncedCallback: (state) => console.log('a after syncing is', state.a),
+  errorCallback: (message) => console.log('failed', message.substring(1)),
+});
 
 dispatch([{ a: ['+', 1] }, { a: ['+', 1] }]);

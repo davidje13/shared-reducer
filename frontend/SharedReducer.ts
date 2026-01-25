@@ -1,4 +1,4 @@
-import type { Context, Dispatch, DispatchSpec, SpecSource } from './DispatchSpec';
+import type { Context, Dispatch, DispatchFn, DispatchSpec, SpecSource } from './DispatchSpec';
 import { reduce } from './reduce';
 import { lock } from './helpers/lock';
 import {
@@ -10,6 +10,7 @@ import { AT_LEAST_ONCE, type DeliveryStrategy } from './connection/deliveryStrat
 import { exponentialDelay, OnlineScheduler } from './scheduler/OnlineScheduler';
 import type { Scheduler } from './scheduler/Scheduler';
 import type {
+  ChangeEvent,
   ChangeMessage,
   ErrorMessage,
   InitMessage,
@@ -31,12 +32,14 @@ type SharedReducerEvents = {
   warning: CustomEvent<Error>;
 };
 
+type StateListener<T> = (state: Readonly<T>, events: Readonly<Readonly<ChangeEvent>[]>) => void;
+
 export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvents> {
   private readonly _ws: ReconnectingWebSocket;
   private _paused = true;
   private _state: State<T, SpecT> = { _stage: 0, _queue: [] };
   private readonly _tracker: LocalChangeTracker<T, SpecT>;
-  private readonly _listeners: Set<(state: T) => void> = new Set();
+  private readonly _listeners: Set<StateListener<T>> = new Set();
   private readonly _dispatchLock = lock('Cannot dispatch recursively');
 
   public constructor(
@@ -61,12 +64,22 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     this._ws.reconnect(connectionInfo);
   }
 
-  public readonly dispatch = makeDispatch<T, SpecT>((specs, resolve, reject) => {
-    if (!specs.length && !resolve && !reject) {
+  public readonly dispatch = makeDispatch<T, SpecT>((specs, options = {}) => {
+    if (
+      !specs.length &&
+      !options.events?.length &&
+      !options.syncedCallback &&
+      !options.errorCallback
+    ) {
       return;
     }
 
-    const item: DispatchArgs<T, SpecT> = { _specs: specs, _resolve: resolve, _reject: reject };
+    const item: DispatchArgs<T, SpecT> = {
+      _specs: specs,
+      _events: options.events,
+      _resolve: options.syncedCallback,
+      _reject: options.errorCallback,
+    };
     switch (this._state._stage) {
       case -1:
         throw new Error('closed');
@@ -74,7 +87,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
         this._state._queue.push(item);
         break;
       case 1:
-        this._setLocalState(this._apply(this._state._local, [item]));
+        this._setLocalState(this._apply(this._state._local, [item]), options.events);
         this._share._schedule();
         break;
     }
@@ -82,11 +95,13 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
 
   private _apply(localState: T, changes: DispatchArgs<T, SpecT>[]) {
     return this._dispatchLock(() => {
-      for (const { _specs, _resolve, _reject } of changes) {
+      for (const { _specs, _events, _resolve, _reject } of changes) {
         if (_specs.length) {
           const { _state, _delta } = reduce(this._context, localState, _specs);
           localState = _state;
-          this._tracker._add(_delta);
+          this._tracker._add(_delta, _events);
+        } else if (_events?.length) {
+          this._tracker._add(this._context.combine([]), _events);
         }
         this._tracker._addCallback(localState, _resolve, _reject);
       }
@@ -109,7 +124,7 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     if (this._state._stage === 0) {
       const s = this._apply(message.init, this._state._queue);
       this._state = { _stage: 1, _server: message.init, _local: s };
-      this._setLocalState(s, true);
+      this._setLocalState(s, NO_EVENTS, true);
     } else {
       this._state._server = message.init;
       this._tracker._requeue(message.init);
@@ -131,7 +146,10 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
 
     const { _localChange, _isFirst } = this._tracker._popChange(message.id);
     if (!_isFirst) {
-      this._setLocalState(this._tracker._computeLocal(serverState));
+      this._setLocalState(
+        this._tracker._computeLocal(serverState),
+        _localChange ? NO_EVENTS : message.events,
+      );
     }
     _localChange?._resolve.forEach((f) => f(serverState));
   }
@@ -179,25 +197,25 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
     }
   };
 
-  public addStateListener(listener: (state: Readonly<T>) => void) {
+  public addStateListener(listener: StateListener<T>) {
     this._listeners.add(listener);
     if (this._state._stage === 1) {
-      listener(this._state._local);
+      listener(this._state._local, []);
     }
   }
 
-  public removeStateListener(listener: (state: Readonly<T>) => void) {
+  public removeStateListener(listener: StateListener<T>) {
     this._listeners.delete(listener);
   }
 
-  private _setLocalState(s: T, forceSend = false) {
+  private _setLocalState(s: T, events: ChangeEvent[] = NO_EVENTS, forceSend = false) {
     if (this._state._stage !== 1) {
       throw new Error('invalid state');
     }
-    if (forceSend || this._state._local !== s) {
+    if (forceSend || this._state._local !== s || events.length) {
       this._state._local = s;
       for (const listener of this._listeners) {
-        listener(s);
+        listener(s, events);
       }
     }
   }
@@ -245,21 +263,23 @@ export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvent
   }
 }
 
-function makeDispatch<T, SpecT>(
-  handler: (
-    specs: DispatchSpec<T, SpecT>,
-    syncedCallback?: (state: T) => void,
-    errorCallback?: (error: string) => void,
-  ) => void,
-): Dispatch<T, SpecT> {
+function makeDispatch<T, SpecT>(handler: DispatchFn<T, SpecT>): Dispatch<T, SpecT> {
   return Object.assign(handler, {
-    sync: (specs: DispatchSpec<T, SpecT> = []) =>
+    sync: (
+      specs: DispatchSpec<T, SpecT> = [],
+      options: { events?: ChangeEvent[] | undefined } = {},
+    ) =>
       new Promise<T>((resolve, reject) =>
-        handler(specs, resolve, (message) => reject(new Error(message))),
+        handler(specs, {
+          ...options,
+          syncedCallback: resolve,
+          errorCallback: (message) => reject(new Error(message)),
+        }),
       ),
   });
 }
 
+const NO_EVENTS: never[] = [];
 const CLOSE_DETAIL: DisconnectDetail = { code: 0, reason: 'graceful shutdown' };
 
 const DEFAULT_RECONNECT = exponentialDelay({
@@ -271,6 +291,7 @@ const DEFAULT_RECONNECT = exponentialDelay({
 
 interface DispatchArgs<T, SpecT> {
   _specs: SpecSource<T, SpecT>[];
+  _events: ChangeEvent[] | undefined;
   _resolve: ((state: T) => void) | undefined;
   _reject: ((message: string) => void) | undefined;
 }

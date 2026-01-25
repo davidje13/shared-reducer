@@ -1,6 +1,7 @@
 import type { DeliveryStrategy } from './deliveryStrategies';
 import type { Context } from '../DispatchSpec';
 import { idProvider } from '../helpers/idProvider';
+import type { ChangeEvent } from './messages';
 
 export class LocalChangeTracker<T, SpecT> {
   private readonly _items: LocalChange<T, SpecT>[] = [];
@@ -11,8 +12,14 @@ export class LocalChangeTracker<T, SpecT> {
     private readonly _deliveryStrategy: DeliveryStrategy<T, SpecT>,
   ) {}
 
-  public _add(delta: SpecT) {
-    this._items.push({ _id: undefined, _change: delta, _resolve: [], _reject: [] });
+  public _add(delta: SpecT, events?: ChangeEvent[] | undefined) {
+    this._items.push({
+      _id: undefined,
+      _change: delta,
+      _events: events,
+      _resolve: [],
+      _reject: [],
+    });
   }
 
   public _addCallback(
@@ -56,6 +63,7 @@ export class LocalChangeTracker<T, SpecT> {
           const combined = this._items[i - 1]!;
           const parts = this._items.splice(rangeStart, count, combined);
           combined._change = this._context.combine(parts.map((p) => p._change));
+          combined._events = mergeEvents(parts.map((p) => p._events));
           i -= count - 1;
         }
         rangeStart = i + 1;
@@ -65,7 +73,7 @@ export class LocalChangeTracker<T, SpecT> {
     for (const change of this._items) {
       if (change._id === undefined) {
         change._id = this._nextId();
-        sender(JSON.stringify({ change: change._change, id: change._id }));
+        sender(JSON.stringify({ change: change._change, events: change._events, id: change._id }));
       }
     }
   }
@@ -90,11 +98,33 @@ export class LocalChangeTracker<T, SpecT> {
   }
 }
 
+function mergeEvents(l: (ChangeEvent[] | undefined)[]) {
+  const [first, ...rest] = l.filter((v) => v !== undefined);
+  if (!first) {
+    return undefined;
+  }
+  if (!rest.length) {
+    return first;
+  }
+  const r = [...first];
+  for (const b of rest) {
+    for (const event of b) {
+      const p = r.findIndex((e) => e[0] === event[0]);
+      if (p !== -1) {
+        r.splice(p, 1);
+      }
+      r.push(event);
+    }
+  }
+  return r;
+}
+
 const NOOP = () => null;
 
 interface LocalChange<T, SpecT> {
   _id: number | undefined;
   _change: SpecT;
+  _events: ChangeEvent[] | undefined;
   _resolve: ((state: T) => void)[];
   _reject: ((message: string) => void)[];
 }

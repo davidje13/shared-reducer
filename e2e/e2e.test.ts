@@ -250,16 +250,18 @@ describe('e2e', () => {
 
       expect(reducer.getState()).toEqual({ foo: 'while offline', bar: 2 });
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while online', bar: 1 });
-      expect(serverside.specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
+      expect(serverside.specs).toEqual([
+        { change: ['=', { foo: 'while online', bar: 1 }], events: undefined },
+      ]);
 
       proxy.resume();
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 2 }); // should auto-reconnect
 
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 2 }); // should re-send missed state changes
       expect(serverside.specs).toEqual([
-        { change: ['=', { foo: 'while online', bar: 1 }] },
-        { change: { bar: ['=', 2] } },
-        { change: { foo: ['=', 'while offline'] } },
+        { change: ['=', { foo: 'while online', bar: 1 }], events: undefined },
+        { change: { bar: ['=', 2] }, events: undefined },
+        { change: { foo: ['=', 'while offline'] }, events: undefined },
       ]);
 
       await serverside.close();
@@ -297,7 +299,9 @@ describe('e2e', () => {
 
       reducer.dispatch([['=', { foo: 'while online', bar: 1 }]]);
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while online', bar: 1 });
-      expect(serverside.specs).toEqual([{ change: ['=', { foo: 'while online', bar: 1 }] }]);
+      expect(serverside.specs).toEqual([
+        { change: ['=', { foo: 'while online', bar: 1 }], events: undefined },
+      ]);
 
       proxy.pullWire();
       requiredToken = 'second';
@@ -318,8 +322,8 @@ describe('e2e', () => {
       expect(await reducer.dispatch.sync()).toEqual({ foo: 'while offline', bar: 1 }); // should auto-reconnect with new password
 
       expect(serverside.specs).toEqual([
-        { change: ['=', { foo: 'while online', bar: 1 }] },
-        { change: ['=', { foo: 'while offline', bar: 1 }] },
+        { change: ['=', { foo: 'while online', bar: 1 }], events: undefined },
+        { change: ['=', { foo: 'while offline', bar: 1 }], events: undefined },
       ]);
 
       await serverside.close();
@@ -353,9 +357,9 @@ describe('e2e', () => {
 
       expect(await peekState(broadcaster, 'a')).toEqual({ foo: 'while offline', bar: 1 });
       expect(serverside.specs).toEqual([
-        { change: ['=', { foo: 'while online', bar: 1 }] },
+        { change: ['=', { foo: 'while online', bar: 1 }], events: undefined },
         // bar=2 change is lost - client does not know if it was received when the wire was pulled
-        { change: { foo: ['=', 'while offline'] } },
+        { change: { foo: ['=', 'while offline'] }, events: undefined },
       ]);
 
       await serverside.close();
@@ -427,6 +431,68 @@ describe('e2e', () => {
       await reducer2.dispatch.sync([{ bar: ['=', 20] }]);
 
       expect(reducer2.getState()).toEqual({ foo: 'v2', bar: 20 });
+    });
+
+    it('pushes events between clients', async ({ getTyped }) => {
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer1 = getReducer<TestT>(server, '/a');
+      const reducer2 = getReducer<TestT>(server, '/a');
+      const captured1: unknown[] = [];
+      const captured2: unknown[] = [];
+      reducer1.addStateListener((state, events) => captured1.push({ state, events }));
+      reducer2.addStateListener((state, events) => captured2.push({ state, events }));
+
+      await reducer1.dispatch.sync();
+      await reducer2.dispatch.sync();
+
+      await Promise.all([
+        reducer1.dispatch.sync([{ foo: ['=', 'v2'] }], { events: [['poke']] }),
+        reducer2.dispatch.sync([{ bar: ['=', 20] }]),
+      ]);
+
+      await expect.poll(
+        () => captured1,
+        toEqual<unknown[]>([
+          { state: { foo: 'v1', bar: 10 }, events: [] },
+          { state: { foo: 'v2', bar: 10 }, events: [['poke']] },
+          { state: { foo: 'v2', bar: 20 }, events: [] },
+        ]),
+      );
+      await expect.poll(
+        () => captured2,
+        toEqual<unknown[]>([
+          { state: { foo: 'v1', bar: 10 }, events: [] },
+          { state: { foo: 'v1', bar: 20 }, events: [] },
+          { state: { foo: 'v2', bar: 20 }, events: [['poke']] },
+        ]),
+      );
+    });
+
+    it('allows sending events without changes', async ({ getTyped }) => {
+      const { server, getReducer } = await getTyped(RUNNER).basicSetup(INITIAL_STATE);
+      const reducer1 = getReducer<TestT>(server, '/a');
+      const reducer2 = getReducer<TestT>(server, '/a');
+      const captured1: unknown[] = [];
+      const captured2: unknown[] = [];
+      reducer1.addStateListener((state, events) => captured1.push({ state, events }));
+      reducer2.addStateListener((state, events) => captured2.push({ state, events }));
+
+      await reducer1.dispatch.sync();
+      await reducer2.dispatch.sync();
+
+      reducer1.dispatch([], { events: [['poke']] });
+
+      expect(captured1).toEqual([
+        { state: { foo: 'v1', bar: 10 }, events: [] },
+        { state: { foo: 'v1', bar: 10 }, events: [['poke']] },
+      ]);
+      await expect.poll(
+        () => captured2,
+        toEqual<unknown[]>([
+          { state: { foo: 'v1', bar: 10 }, events: [] },
+          { state: { foo: 'v1', bar: 10 }, events: [['poke']] },
+        ]),
+      );
     });
   });
 

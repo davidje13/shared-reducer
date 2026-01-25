@@ -3,7 +3,7 @@ import { AT_LEAST_ONCE, AT_MOST_ONCE } from './deliveryStrategies';
 import { LocalChangeTracker } from './LocalChangeTracker';
 
 describe('LocalChangeTracker', () => {
-  it('queues items to send to the server', () => {
+  it('queues changes to send to the server', () => {
     const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
 
     tracker._add(['=', 2]);
@@ -11,6 +11,16 @@ describe('LocalChangeTracker', () => {
     const sent = makeJSONCaptor();
     tracker._send(sent.captor);
     expect(sent.captured).toEqual([{ id: 1, change: ['=', 2] }]);
+  });
+
+  it('queues events to send to the server', () => {
+    const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
+
+    tracker._add({}, [['foo', 1]]);
+
+    const sent = makeJSONCaptor();
+    tracker._send(sent.captor);
+    expect(sent.captured).toEqual([{ id: 1, change: {}, events: [['foo', 1]] }]);
   });
 
   describe('computeLocal', () => {
@@ -125,7 +135,7 @@ describe('LocalChangeTracker', () => {
   });
 
   describe('send', () => {
-    it('combines multiple items', () => {
+    it('combines multiple changes', () => {
       const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
 
       tracker._add({ foo: ['=', 2] });
@@ -136,7 +146,7 @@ describe('LocalChangeTracker', () => {
       expect(sent.captured).toEqual([{ id: 1, change: { foo: ['=', 2], bar: ['=', 3] } }]);
     });
 
-    it('does not combine items with callbacks', () => {
+    it('does not combine changes with callbacks', () => {
       const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
 
       tracker._add({ foo: ['=', 2] });
@@ -151,7 +161,34 @@ describe('LocalChangeTracker', () => {
       ]);
     });
 
-    it('does not combine or re-send items which have been sent', () => {
+    it('combines and deduplicates multiple events', () => {
+      const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
+
+      tracker._add({}, [
+        ['foo', 1],
+        ['bar', 1],
+      ]);
+      tracker._add({}, [
+        ['foo', 2], // overrides [foo, 1] above
+        ['baz', 2],
+      ]);
+
+      const sent = makeJSONCaptor();
+      tracker._send(sent.captor);
+      expect(sent.captured).toEqual([
+        {
+          id: 1,
+          change: {},
+          events: [
+            ['bar', 1],
+            ['foo', 2],
+            ['baz', 2],
+          ],
+        },
+      ]);
+    });
+
+    it('does not combine or re-send changes which have been sent', () => {
       const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
 
       tracker._add({ foo: ['=', 2] });
@@ -189,6 +226,32 @@ describe('LocalChangeTracker', () => {
         { id: 2, change: { c: ['=', 1] } },
         { id: 3, change: { d: ['=', 1], e: ['=', 1], f: ['=', 1] } },
         { id: 4, change: { g: ['=', 1] } },
+      ]);
+    });
+
+    it('combines events with changes', () => {
+      const tracker = new LocalChangeTracker(context, AT_LEAST_ONCE);
+
+      tracker._add({ a: ['=', 1] }, [['a']]);
+      tracker._add({ b: ['=', 1] }, [['b']]);
+
+      tracker._add({ c: ['=', 1] }, [['c']]);
+      tracker._addCallback(null, () => null, undefined);
+
+      tracker._add({ d: ['=', 1] }, [['d']]);
+      tracker._add({ e: ['=', 1] }, [['e']]);
+      tracker._add({ f: ['=', 1] }, [['f']]);
+
+      tracker._add({ g: ['=', 1] }, [['g']]);
+      tracker._addCallback(null, () => null, undefined);
+
+      const sent = makeJSONCaptor();
+      tracker._send(sent.captor);
+      expect(sent.captured).toEqual([
+        { id: 1, change: { a: ['=', 1], b: ['=', 1] }, events: [['a'], ['b']] },
+        { id: 2, change: { c: ['=', 1] }, events: [['c']] },
+        { id: 3, change: { d: ['=', 1], e: ['=', 1], f: ['=', 1] }, events: [['d'], ['e'], ['f']] },
+        { id: 4, change: { g: ['=', 1] }, events: [['g']] },
       ]);
     });
   });

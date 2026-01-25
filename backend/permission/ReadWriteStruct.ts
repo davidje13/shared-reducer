@@ -19,4 +19,8 @@ export class ReadWriteStruct<T extends object> implements Permission<T, unknown>
       }
     }
   }
+
+  validateEvent(): void {
+    // nothing to do
+  }
 }
