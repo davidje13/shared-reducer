@@ -32,7 +32,10 @@ type SharedReducerEvents = {
   warning: CustomEvent<Error>;
 };
 
-type StateListener<T> = (state: Readonly<T>, events: Readonly<Readonly<ChangeEvent>[]>) => void;
+export type StateListener<T> = (
+  state: Readonly<T>,
+  events: Readonly<Readonly<ChangeEvent>[]>,
+) => void;
 
 export class SharedReducer<T, SpecT> extends TypedEventTarget<SharedReducerEvents> {
   private readonly _ws: ReconnectingWebSocket;
