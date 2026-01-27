@@ -26,14 +26,16 @@ export interface Subscription<T, SpecT, MetaT> {
 type Identifier = string | null;
 
 export type ChangeInfo<SpecT> =
-  | { change: SpecT; events: Readonly<Readonly<ChangeEvent>[]> | undefined; error?: undefined }
-  | { change?: undefined; error: string };
+  | { change: SpecT; events: Readonly<Readonly<ChangeEvent>[]> | undefined; error?: never }
+  | { change?: never; events?: never; error: string };
 
 export interface TopicMessage<SpecT> {
   message: ChangeInfo<SpecT>;
   source: Identifier;
   meta?: unknown;
 }
+
+export type EventFilter = (evt: Readonly<ChangeEvent>) => boolean;
 
 type ID = string;
 
@@ -59,6 +61,7 @@ export class Broadcaster<T, SpecT> {
   public async subscribe<MetaT = void>(
     id: ID,
     permission: Permission<T, SpecT> = ReadWrite,
+    eventFilter?: EventFilter,
   ): Promise<Subscription<T, SpecT, MetaT> | null> {
     let state:
       | { _stage: 0 }
@@ -68,10 +71,18 @@ export class Broadcaster<T, SpecT> {
     const eventHandler = (m: TopicMessage<SpecT>) => {
       if (state._stage === 2) {
         // we're up and running
+        let message = m.message;
+        if (eventFilter && message.events?.length) {
+          const filteredEvents = message.events.filter(eventFilter);
+          message = { ...message, events: filteredEvents.length ? filteredEvents : undefined };
+        }
         if (m.source === myId) {
-          state._onChange(m.message, m.meta as MetaT);
-        } else if (m.message.change) {
-          state._onChange(m.message, undefined);
+          state._onChange(message, m.meta as MetaT);
+        } else if (message.change) {
+          if (!message.events?.length && this._context.isNoOp?.(message.change)) {
+            return; // nothing to send
+          }
+          state._onChange(message, undefined);
         }
       } else if (state._stage === 1) {
         // we've loaded the initial data, but haven't yet called listen;

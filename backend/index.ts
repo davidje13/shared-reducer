@@ -4,6 +4,7 @@ import {
   type Subscription,
   type ChangeInfo,
   type TopicMessage,
+  type EventFilter,
 } from './Broadcaster';
 import {
   WebsocketHandlerFactory,
@@ -14,8 +15,9 @@ import {
 } from './handlers/WebsocketHandlerFactory';
 import { UniqueIdProvider } from './helpers/UniqueIdProvider';
 import { CollectionStorageModel } from './model/CollectionStorageModel';
-import { type Permission, PermissionError } from './permission/Permission';
 import { InMemoryModel } from './model/InMemoryModel';
+import type { ChangeEvent } from './model/ChangeEvent';
+import { type Permission, PermissionError } from './permission/Permission';
 import { ReadOnly } from './permission/ReadOnly';
 import { ReadWrite } from './permission/ReadWrite';
 import { ReadWriteStruct } from './permission/ReadWriteStruct';
@@ -32,6 +34,8 @@ export {
   type Context,
   type Subscription,
   type ChangeInfo,
+  type ChangeEvent,
+  type EventFilter,
   type TopicMessage,
   type Model,
   type Permission,

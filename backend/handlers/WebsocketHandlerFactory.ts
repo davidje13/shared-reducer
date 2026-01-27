@@ -1,4 +1,4 @@
-import type { Broadcaster } from '../Broadcaster';
+import type { Broadcaster, EventFilter } from '../Broadcaster';
 import { PermissionError, type Permission } from '../permission/Permission';
 import type { MaybePromise } from '../helpers/MaybePromise';
 import { MessageParseError, unpackMessage } from './Message';
@@ -21,6 +21,7 @@ interface ServerWebSocket {
 interface Access<T, SpecT> {
   id: string;
   permission: Permission<T, SpecT>;
+  eventFilter?: EventFilter;
 }
 
 type First<T extends any[]> = T extends [infer F, ...any[]] ? F : never;
@@ -63,8 +64,8 @@ export class WebsocketHandlerFactory<T, SpecT> {
       const teardowns: (() => MaybePromise<void>)[] = [];
       let pingTm: NodeJS.Timeout | undefined;
       try {
-        const { id, permission } = await accessGetter(...args);
-        const subscription = await this.broadcaster.subscribe<number>(id, permission);
+        const { id, permission, eventFilter } = await accessGetter(...args);
+        const subscription = await this.broadcaster.subscribe<number>(id, permission, eventFilter);
         if (!subscription) {
           throw notFoundError;
         }

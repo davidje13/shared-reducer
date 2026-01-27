@@ -1,6 +1,8 @@
 import context, { type Spec } from 'json-immutability-helper';
-import { Broadcaster, type ChangeInfo, type Subscription } from './Broadcaster';
 import { InMemoryModel } from './model/InMemoryModel';
+import type { Permission } from './permission/Permission';
+import { ReadWrite } from './permission/ReadWrite';
+import { Broadcaster, type ChangeInfo, type EventFilter } from './Broadcaster';
 
 describe('Broadcaster', () => {
   it('notifies subscribers of updates', async () => {
@@ -193,6 +195,107 @@ describe('Broadcaster', () => {
     await subscription1.close();
     await subscription2.close();
   });
+
+  it('filters events by subscriber', async () => {
+    const { model, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    const changeListener1 = mock<ChangeListenerT>();
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
+
+    const changeListener2 = mock<ChangeListenerT>();
+    const subscription2 = await subscribe<number>('a', ReadWrite, (evt) =>
+      evt[0].startsWith('ok:'),
+    );
+    subscription2.listen(changeListener2);
+
+    await subscription1.send({}, [['no:blocked'], ['ok:allowed'], ['ok:also-allowed']]);
+
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: {}, events: [['no:blocked'], ['ok:allowed'], ['ok:also-allowed']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: {}, events: [['ok:allowed'], ['ok:also-allowed']] },
+      undefined,
+    );
+
+    await subscription1.send({}, [['no:still-blocked']]);
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: {}, events: [['no:still-blocked']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalled({ times: 1 });
+
+    await subscription1.send({ foo: ['=', 'v2'] }, [['no:still-blocked']]);
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: [['no:still-blocked']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: undefined },
+      undefined,
+    );
+
+    await subscription2.send({}, [['no:my-own'], ['ok:my-own']]);
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: {}, events: [['no:my-own'], ['ok:my-own']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: {}, events: [['ok:my-own']] },
+      undefined,
+    );
+
+    await subscription1.close();
+    await subscription2.close();
+  });
+
+  it('notifies sender even if all events are filtered out', async () => {
+    const { model, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    const changeListener1 = mock<ChangeListenerT>();
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
+
+    const changeListener2 = mock<ChangeListenerT>();
+    const subscription2 = await subscribe<number>('a', ReadWrite, (evt) =>
+      evt[0].startsWith('ok:'),
+    );
+    subscription2.listen(changeListener2);
+
+    await subscription2.send({}, [['no:my-own']]);
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: {}, events: [['no:my-own']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalledWith({ change: {}, events: undefined }, undefined);
+
+    await subscription1.close();
+    await subscription2.close();
+  });
+
+  it('notifies sender even if change is a no-op', async () => {
+    const { model, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    const changeListener1 = mock<ChangeListenerT>();
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
+
+    const changeListener2 = mock<ChangeListenerT>();
+    const subscription2 = await subscribe<number>('a');
+    subscription2.listen(changeListener2);
+
+    await subscription1.send({});
+    expect(changeListener1).toHaveBeenCalledWith({ change: {}, events: undefined }, undefined);
+    expect(changeListener2).not(toHaveBeenCalled());
+
+    await subscription1.close();
+    await subscription2.close();
+  });
 });
 
 type ChangeListenerT = (message: ChangeInfo<Spec<TestT>>, meta?: number) => void;
@@ -215,19 +318,19 @@ function validateTestT(x: unknown): TestT {
   return test;
 }
 
-function setup<T>(validator: (x: unknown) => T): {
-  model: InMemoryModel<string, T>;
-  broadcaster: Broadcaster<T, Spec<T>>;
-  subscribe<MetaT>(id: string): Promise<Subscription<T, Spec<T>, MetaT>>;
-} {
+function setup<T>(validator: (x: unknown) => T) {
   const model = new InMemoryModel<string, T>(validator);
   const broadcaster = new Broadcaster<T, Spec<T>>(model, context);
 
   return {
     model,
     broadcaster,
-    async subscribe<MetaT>(id: string) {
-      const subscription = await broadcaster.subscribe<MetaT>(id);
+    async subscribe<MetaT>(
+      id: string,
+      permission?: Permission<T, Spec<T>>,
+      eventFilter?: EventFilter,
+    ) {
+      const subscription = await broadcaster.subscribe<MetaT>(id, permission, eventFilter);
       if (!subscription) {
         throw new Error('Failed to subscribe');
       }
