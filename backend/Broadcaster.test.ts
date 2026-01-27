@@ -252,6 +252,35 @@ describe('Broadcaster', () => {
     await subscription2.close();
   });
 
+  it('logs errors from event filter and hides all events by default', async () => {
+    const { model, subscribe } = setup(validateTestT);
+    model.set('a', { foo: 'v1' });
+
+    const changeListener1 = mock<ChangeListenerT>();
+    const subscription1 = await subscribe<number>('a');
+    subscription1.listen(changeListener1);
+
+    const changeListener2 = mock<ChangeListenerT>();
+    const subscription2 = await subscribe<number>('a', ReadWrite, () => {
+      throw new Error('oops');
+    });
+    subscription2.listen(changeListener2);
+
+    await subscription1.send({ foo: ['=', 'v2'] }, [['anything']]);
+
+    expect(changeListener1).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: [['anything']] },
+      undefined,
+    );
+    expect(changeListener2).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v2'] }, events: undefined },
+      undefined,
+    );
+
+    await subscription1.close();
+    await subscription2.close();
+  });
+
   it('notifies sender even if all events are filtered out', async () => {
     const { model, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });

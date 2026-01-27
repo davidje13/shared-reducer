@@ -43,6 +43,7 @@ export class Broadcaster<T, SpecT> {
   private readonly _subscribers: TopicMap<ID, TopicMessage<SpecT>>;
   private readonly _taskQueues: TaskQueueMap<ID>;
   private readonly _idProvider: () => MaybePromise<string>;
+  private readonly _onError: (error: unknown) => void;
 
   public constructor(
     private readonly _model: Model<ID, T>,
@@ -51,17 +52,19 @@ export class Broadcaster<T, SpecT> {
       subscribers?: TopicMap<ID, TopicMessage<SpecT>>;
       taskQueues?: TaskQueueMap<ID>;
       idProvider?: () => MaybePromise<string>;
+      onError?: (error: unknown) => void;
     } = {},
   ) {
     this._subscribers = options.subscribers ?? new TrackingTopicMap(() => new InMemoryTopic());
     this._taskQueues = options.taskQueues ?? new TaskQueueMap<ID>();
     this._idProvider = options.idProvider ?? UniqueIdProvider();
+    this._onError = options.onError ?? ((err: unknown) => console.error(err));
   }
 
   public async subscribe<MetaT = void>(
     id: ID,
     permission: Permission<T, SpecT> = ReadWrite,
-    eventFilter?: EventFilter,
+    eventFilter?: EventFilter | undefined,
   ): Promise<Subscription<T, SpecT, MetaT> | null> {
     let state:
       | { _stage: 0 }
@@ -73,16 +76,28 @@ export class Broadcaster<T, SpecT> {
         // we're up and running
         let message = m.message;
         if (eventFilter && message.events?.length) {
-          const filteredEvents = message.events.filter(eventFilter);
-          message = { ...message, events: filteredEvents.length ? filteredEvents : undefined };
-        }
-        if (m.source === myId) {
-          state._onChange(message, m.meta as MetaT);
-        } else if (message.change) {
-          if (!message.events?.length && this._context.isNoOp?.(message.change)) {
-            return; // nothing to send
+          let filteredEvents: Readonly<ChangeEvent>[] | undefined;
+          try {
+            filteredEvents = message.events.filter(eventFilter);
+          } catch (error) {
+            this._onError(`eventFilter threw: ${error}`);
+            filteredEvents = undefined; // hide all events
           }
-          state._onChange(message, undefined);
+          if (!filteredEvents || filteredEvents.length < message.events.length) {
+            message = { ...message, events: filteredEvents?.length ? filteredEvents : undefined };
+          }
+        }
+        try {
+          if (m.source === myId) {
+            state._onChange(message, m.meta as MetaT);
+          } else if (message.change) {
+            if (!message.events?.length && this._context.isNoOp?.(message.change)) {
+              return; // nothing to send
+            }
+            state._onChange(message, undefined);
+          }
+        } catch (error) {
+          this._onError(`subscription listener threw: ${error}`);
         }
       } else if (state._stage === 1) {
         // we've loaded the initial data, but haven't yet called listen;

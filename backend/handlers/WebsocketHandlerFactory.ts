@@ -21,7 +21,7 @@ interface ServerWebSocket {
 interface Access<T, SpecT> {
   id: string;
   permission: Permission<T, SpecT>;
-  eventFilter?: EventFilter;
+  eventFilter?: EventFilter | undefined;
 }
 
 type First<T extends any[]> = T extends [infer F, ...any[]] ? F : never;
