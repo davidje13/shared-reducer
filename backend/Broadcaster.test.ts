@@ -64,7 +64,7 @@ describe('Broadcaster', () => {
     const subscription2 = await subscribe<number>('a');
     subscription2.listen(changeListener2);
 
-    await subscription1.send({ foo: ['=', 'v2'] }, [], 20);
+    await subscription1.send({ foo: ['=', 'v2'] }, {}, 20);
 
     expect(changeListener1).toHaveBeenCalledWith(
       { change: { foo: ['=', 'v2'] }, events: undefined },
@@ -79,7 +79,7 @@ describe('Broadcaster', () => {
     await subscription2.close();
   });
 
-  it('shares events between client', async () => {
+  it('shares events between clients', async () => {
     const { model, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });
 
@@ -91,7 +91,7 @@ describe('Broadcaster', () => {
     const subscription2 = await subscribe<number>('a');
     subscription2.listen(changeListener2);
 
-    await subscription1.send({ foo: ['=', 'v2'] }, [['foo']], 20);
+    await subscription1.send({ foo: ['=', 'v2'] }, { events: [['foo']] }, 20);
 
     expect(changeListener1).toHaveBeenCalledWith(
       { change: { foo: ['=', 'v2'] }, events: [['foo']] },
@@ -104,6 +104,60 @@ describe('Broadcaster', () => {
 
     await subscription1.close();
     await subscription2.close();
+  });
+
+  it('invokes "before" with the existing state before updating', async () => {
+    const { model, broadcaster } = setup(validateTestT);
+    const before = mock<(state: TestT) => void>();
+
+    model.set('a', { foo: 'v1' });
+
+    await broadcaster.update('a', { foo: ['=', 'v2'] }, { before });
+    expect(before).toHaveBeenCalled({ times: 1 });
+    expect(before).toHaveBeenCalledWith({ foo: 'v1' });
+  });
+
+  it('waits for "before" to resolve before updating', async () => {
+    const { model, broadcaster, subscribe } = setup(validateTestT);
+    let done: () => void;
+
+    const before = mock<(state: TestT) => Promise<void>>().returning(
+      new Promise<void>((resolve) => {
+        done = resolve;
+      }),
+    );
+
+    model.set('a', { foo: 'v1' });
+
+    const changeListener = mock<ChangeListenerT>();
+    const subscription = await subscribe<number>('a');
+    subscription.listen(changeListener);
+
+    const p = broadcaster.update('a', { foo: ['=', 'v2'] }, { before });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(before).toHaveBeenCalled({ times: 1 });
+    expect(changeListener).not(toHaveBeenCalled());
+    done!();
+    await p;
+    expect(changeListener).toHaveBeenCalled({ times: 1 });
+
+    await subscription.close();
+  });
+
+  it('rejects changes if "before" throws', async () => {
+    const { model, broadcaster, subscribe } = setup(validateTestT);
+    const before = mock<(state: TestT) => Promise<void>>().throwing(new Error('nope'));
+
+    model.set('a', { foo: 'v1' });
+
+    const changeListener = mock<ChangeListenerT>();
+    const subscription = await subscribe<number>('a');
+    subscription.listen(changeListener);
+
+    await expect(() => broadcaster.update('a', { foo: ['=', 'v2'] }, { before })).throws('nope');
+    expect(changeListener).not(toHaveBeenCalled());
+
+    await subscription.close();
   });
 
   it('queues changes received after loading initial data until listen is called', async () => {
@@ -167,7 +221,7 @@ describe('Broadcaster', () => {
 
     await subscription1.close();
 
-    await subscription2.send({ foo: ['=', 'v2'] }, [], 20);
+    await subscription2.send({ foo: ['=', 'v2'] }, {}, 20);
     expect(changeListener1).not(toHaveBeenCalled());
     expect(changeListener2).toHaveBeenCalled();
 
@@ -187,7 +241,7 @@ describe('Broadcaster', () => {
     subscription2.listen(changeListener2);
 
     const invalidType = 'eek' as unknown as TestT;
-    await subscription1.send(['=', invalidType], [], 20);
+    await subscription1.send(['=', invalidType], {}, 20);
 
     expect(changeListener1).toHaveBeenCalledWith({ error: 'should be an object' }, 20);
     expect(changeListener2).not(toHaveBeenCalled());
@@ -210,7 +264,7 @@ describe('Broadcaster', () => {
     );
     subscription2.listen(changeListener2);
 
-    await subscription1.send({}, [['no:blocked'], ['ok:allowed'], ['ok:also-allowed']]);
+    await subscription1.send({}, { events: [['no:blocked'], ['ok:allowed'], ['ok:also-allowed']] });
 
     expect(changeListener1).toHaveBeenCalledWith(
       { change: {}, events: [['no:blocked'], ['ok:allowed'], ['ok:also-allowed']] },
@@ -221,14 +275,14 @@ describe('Broadcaster', () => {
       undefined,
     );
 
-    await subscription1.send({}, [['no:still-blocked']]);
+    await subscription1.send({}, { events: [['no:still-blocked']] });
     expect(changeListener1).toHaveBeenCalledWith(
       { change: {}, events: [['no:still-blocked']] },
       undefined,
     );
     expect(changeListener2).toHaveBeenCalled({ times: 1 });
 
-    await subscription1.send({ foo: ['=', 'v2'] }, [['no:still-blocked']]);
+    await subscription1.send({ foo: ['=', 'v2'] }, { events: [['no:still-blocked']] });
     expect(changeListener1).toHaveBeenCalledWith(
       { change: { foo: ['=', 'v2'] }, events: [['no:still-blocked']] },
       undefined,
@@ -238,7 +292,7 @@ describe('Broadcaster', () => {
       undefined,
     );
 
-    await subscription2.send({}, [['no:my-own'], ['ok:my-own']]);
+    await subscription2.send({}, { events: [['no:my-own'], ['ok:my-own']] });
     expect(changeListener1).toHaveBeenCalledWith(
       { change: {}, events: [['no:my-own'], ['ok:my-own']] },
       undefined,
@@ -266,7 +320,7 @@ describe('Broadcaster', () => {
     });
     subscription2.listen(changeListener2);
 
-    await subscription1.send({ foo: ['=', 'v2'] }, [['anything']]);
+    await subscription1.send({ foo: ['=', 'v2'] }, { events: [['anything']] });
 
     expect(changeListener1).toHaveBeenCalledWith(
       { change: { foo: ['=', 'v2'] }, events: [['anything']] },
@@ -295,7 +349,7 @@ describe('Broadcaster', () => {
     );
     subscription2.listen(changeListener2);
 
-    await subscription2.send({}, [['no:my-own']]);
+    await subscription2.send({}, { events: [['no:my-own']] });
     expect(changeListener1).toHaveBeenCalledWith(
       { change: {}, events: [['no:my-own']] },
       undefined,

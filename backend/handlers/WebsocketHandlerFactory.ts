@@ -147,7 +147,11 @@ export class WebsocketHandlerFactory<T, SpecT> {
 
           try {
             const request = unpackMessage(msg);
-            await subscription.send(request.change as SpecT, request.events, request.id);
+            await subscription.send(
+              request.change as SpecT,
+              { events: request.events },
+              request.id,
+            );
           } catch (error) {
             if (error instanceof PermissionError || error instanceof MessageParseError) {
               ws.send(JSON.stringify({ error: error.message }));

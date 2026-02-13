@@ -16,10 +16,20 @@ export interface Context<T, SpecT> {
 
 type Listener<SpecT, MetaT> = (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void;
 
+export interface SendOptions<T, SpecT> {
+  before?: ((state: Readonly<T>) => MaybePromise<void>) | undefined;
+  events?: ChangeEvent[] | undefined;
+  permission: Permission<T, SpecT>;
+}
+
 export interface Subscription<T, SpecT, MetaT> {
   getInitialData(): Readonly<T>;
   listen(onChange: Listener<SpecT, MetaT>): void;
-  send(change: SpecT, events?: ChangeEvent[] | undefined, meta?: MetaT): Promise<void>;
+  send(
+    change: SpecT,
+    options?: Omit<SendOptions<T, SpecT>, 'permission'> | undefined,
+    meta?: MetaT,
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -138,8 +148,8 @@ export class Broadcaster<T, SpecT> {
         state = { _stage: 2, _onChange: onChange };
         queue.forEach(eventHandler);
       },
-      send: (change, events, meta) =>
-        this._internalQueueChange(id, change, events, permission, myId, meta),
+      send: (change, options, meta) =>
+        this._internalQueueChange(id, change, { ...options, permission }, myId, meta),
       close: async () => {
         await this._subscribers.remove(id, eventHandler);
       },
@@ -149,22 +159,15 @@ export class Broadcaster<T, SpecT> {
   public update(
     id: ID,
     change: SpecT,
-    {
-      events,
-      permission = ReadWrite,
-    }: {
-      events?: ChangeEvent[] | undefined;
-      permission?: Permission<T, SpecT>;
-    } = {},
+    { permission = ReadWrite, ...options }: Partial<SendOptions<T, SpecT>> = {},
   ): Promise<void> {
-    return this._internalQueueChange(id, change, events, permission, null, undefined);
+    return this._internalQueueChange(id, change, { ...options, permission }, null, undefined);
   }
 
   private async _internalApplyChange(
     id: ID,
     change: SpecT,
-    events: ChangeEvent[] | undefined,
-    permission: Permission<T, SpecT>,
+    { before, events, permission }: SendOptions<T, SpecT>,
     source: Identifier,
     meta: unknown,
   ) {
@@ -175,18 +178,27 @@ export class Broadcaster<T, SpecT> {
     }
     try {
       permission.validateWriteSpec?.(change);
-      if (!this._context.isNoOp?.(change)) {
+      const isNoOp = this._context.isNoOp?.(change);
+      if (!isNoOp || before) {
         const original = await this._model.read(id);
         if (!original) {
           throw new Error('Deleted');
         }
-        const updated = this._context.update(original, change);
-        const validatedUpdate = this._model.validate(updated);
-        permission.validateWrite(validatedUpdate, original);
+        if (before) {
+          await before(original);
+        }
+        if (!isNoOp) {
+          const updated = this._context.update(original, change);
+          const validatedUpdate = this._model.validate(updated);
+          permission.validateWrite(validatedUpdate, original);
 
-        await this._model.write(id, validatedUpdate, original);
+          await this._model.write(id, validatedUpdate, original);
+        }
       }
     } catch (e) {
+      if (!source) {
+        throw e;
+      }
       this._subscribers.broadcast(id, {
         message: { error: e instanceof Error ? e.message : 'Internal error' },
         source,
@@ -208,13 +220,12 @@ export class Broadcaster<T, SpecT> {
   private async _internalQueueChange(
     id: ID,
     change: SpecT,
-    events: ChangeEvent[] | undefined,
-    permission: Permission<T, SpecT>,
+    options: SendOptions<T, SpecT>,
     source: Identifier,
     meta: unknown,
   ): Promise<void> {
     return this._taskQueues.push(id, () =>
-      this._internalApplyChange(id, change, events, permission, source, meta),
+      this._internalApplyChange(id, change, options, source, meta),
     );
   }
 }
