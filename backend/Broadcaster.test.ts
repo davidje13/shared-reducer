@@ -160,6 +160,24 @@ describe('Broadcaster', () => {
     await subscription.close();
   });
 
+  it('generates specs from the current state if a function is given', async () => {
+    const { model, broadcaster, subscribe } = setup(validateTestT);
+    const changeListener = mock<ChangeListenerT>();
+
+    model.set('a', { foo: 'v1' });
+    const subscription = await subscribe<number>('a');
+    subscription.listen(changeListener);
+
+    await broadcaster.update('a', (s) => ({ foo: ['=', s.foo + '-2'] }));
+
+    expect(changeListener).toHaveBeenCalledWith(
+      { change: { foo: ['=', 'v1-2'] }, events: undefined },
+      undefined,
+    );
+
+    await subscription.close();
+  });
+
   it('queues changes received after loading initial data until listen is called', async () => {
     const { model, broadcaster, subscribe } = setup(validateTestT);
     model.set('a', { foo: 'v1' });

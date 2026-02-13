@@ -17,7 +17,7 @@ export interface Context<T, SpecT> {
 type Listener<SpecT, MetaT> = (message: ChangeInfo<SpecT>, meta: MetaT | undefined) => void;
 
 export interface SendOptions<T, SpecT> {
-  before?: ((state: Readonly<T>) => MaybePromise<void>) | undefined;
+  before?: ((state: Readonly<T>) => MaybePromise<unknown>) | undefined;
   events?: ChangeEvent[] | undefined;
   permission: Permission<T, SpecT>;
 }
@@ -158,7 +158,7 @@ export class Broadcaster<T, SpecT> {
 
   public update(
     id: ID,
-    change: SpecT,
+    change: SpecT | ((state: Readonly<T>) => SpecT),
     { permission = ReadWrite, ...options }: Partial<SendOptions<T, SpecT>> = {},
   ): Promise<void> {
     return this._internalQueueChange(id, change, { ...options, permission }, null, undefined);
@@ -166,7 +166,7 @@ export class Broadcaster<T, SpecT> {
 
   private async _internalApplyChange(
     id: ID,
-    change: SpecT,
+    change: SpecT | ((state: Readonly<T>) => SpecT),
     { before, events, permission }: SendOptions<T, SpecT>,
     source: Identifier,
     meta: unknown,
@@ -177,9 +177,10 @@ export class Broadcaster<T, SpecT> {
       }
     }
     try {
-      permission.validateWriteSpec?.(change);
-      const isNoOp = this._context.isNoOp?.(change);
-      if (!isNoOp || before) {
+      if (typeof change !== 'function') {
+        permission.validateWriteSpec?.(change);
+      }
+      if (typeof change === 'function' || before || !this._context.isNoOp?.(change)) {
         const original = await this._model.read(id);
         if (!original) {
           throw new Error('Deleted');
@@ -187,7 +188,11 @@ export class Broadcaster<T, SpecT> {
         if (before) {
           await before(original);
         }
-        if (!isNoOp) {
+        if (typeof change === 'function') {
+          change = (change as (state: Readonly<T>) => SpecT)(original);
+          permission.validateWriteSpec?.(change);
+        }
+        if (!this._context.isNoOp?.(change)) {
           const updated = this._context.update(original, change);
           const validatedUpdate = this._model.validate(updated);
           permission.validateWrite(validatedUpdate, original);
@@ -195,6 +200,16 @@ export class Broadcaster<T, SpecT> {
           await this._model.write(id, validatedUpdate, original);
         }
       }
+
+      if (events?.length === 0) {
+        events = undefined;
+      }
+
+      this._subscribers.broadcast(id, {
+        message: { change, events },
+        source,
+        meta,
+      });
     } catch (e) {
       if (!source) {
         throw e;
@@ -204,22 +219,12 @@ export class Broadcaster<T, SpecT> {
         source,
         meta,
       });
-      return;
     }
-    if (events?.length === 0) {
-      events = undefined;
-    }
-
-    this._subscribers.broadcast(id, {
-      message: { change, events },
-      source,
-      meta,
-    });
   }
 
   private async _internalQueueChange(
     id: ID,
-    change: SpecT,
+    change: SpecT | ((state: Readonly<T>) => SpecT),
     options: SendOptions<T, SpecT>,
     source: Identifier,
     meta: unknown,
