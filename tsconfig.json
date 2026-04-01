@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "esnext",
     "module": "esnext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "noEmit": true,
 
     "strict": true,
@@ -20,7 +20,9 @@
 
     "isolatedModules": true,
     "esModuleInterop": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+
+    "types": ["node"]
   },
   "include": ["backend", "frontend", "e2e", "test-helpers"]
 }

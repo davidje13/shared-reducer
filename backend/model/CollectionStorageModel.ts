@@ -13,9 +13,10 @@ type ErrorMapper = (e: unknown) => unknown;
 
 const ERROR_NOP: ErrorMapper = (e) => e;
 
-export class CollectionStorageModel<T extends object, K extends keyof T & string>
-  implements Model<T[K], T>
-{
+export class CollectionStorageModel<T extends object, K extends keyof T & string> implements Model<
+  T[K],
+  T
+> {
   private readonly _readErrorIntercept: ErrorMapper;
   private readonly _writeErrorIntercept: ErrorMapper;
 
