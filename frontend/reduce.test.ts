@@ -12,8 +12,8 @@ describe('reduce', () => {
 
     expect(result._state).toEqual({ foo: 4, bar: 8 });
     expect(result._delta).toEqual({
-      foo: ['seq', ['+', 1], ['+', 2]],
-      bar: ['seq', ['=', 5], ['+', 2], ['+', 1]],
+      foo: ['+', 3],
+      bar: ['=', 8],
     });
   });
 
