@@ -51,12 +51,12 @@
     "collection-storage": "4.x",
     "json-immutability-helper": "4.x",
     "lean-test": "2.x",
-    "prettier": "3.8.1",
+    "prettier": "3.8.3",
     "rollup": "4.x",
     "rollup-plugin-dts": "6.x",
-    "superwstest": "2.x",
+    "superwstest": "3.x",
     "typescript": "6.0.x",
-    "web-listener": "0.20.1",
+    "web-listener": "1.x",
     "ws": "8.x"
   }
 }

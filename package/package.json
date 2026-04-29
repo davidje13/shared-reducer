@@ -9,8 +9,8 @@
     "@types/react": "18.x",
     "json-immutability-helper": "4.x",
     "shared-reducer": "file:shared-reducer.tgz",
-    "typescript": "5.9.x",
-    "web-listener": "0.17.1",
+    "typescript": "6.0.x",
+    "web-listener": "1.x",
     "websocket-express": "4.x"
   }
 }
